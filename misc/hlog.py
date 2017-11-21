@@ -12,11 +12,16 @@ def task(name):
     state.path.pop()
 
 def log(value):
-    print('[%s] %s' % ('/'.join(state.path), value))
+    print('%s %s' % ('/'.join(state.path), value))
 
 def value(name, value):
     with task(name):
         log(value)
+
+def loop(template, coll):
+    for i, item in enumerate(coll):
+        with task(template % i):
+            yield item
 
 def fn(name):
     def wrap(underlying):

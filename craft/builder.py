@@ -34,7 +34,11 @@ class BlockType(namedtuple('BlockType', ['material'])):
     def mat_id(self):
         return self._materials.index(self.material) + 1
 
-    def descriptions(self):
+    @classmethod
+    def with_id(cls, mat_id):
+        return BlockType(cls._materials[mat_id-1])
+
+    def descriptions(self, mentioned=[]):
         yield self._descriptions[self.material]
 
 class Tree(namedtuple('Tree', ['pos', 'leaf_type', 'kind', 'tree_blocks'])):
@@ -89,7 +93,7 @@ class Tree(namedtuple('Tree', ['pos', 'leaf_type', 'kind', 'tree_blocks'])):
     def remove(self, rem):
         return self, 0
 
-    def descriptions(self, top=False):
+    def descriptions(self, top=False, mentioned=[]):
         yield 'a tree'
         yield 'a %s tree' % self._kind_names[self.kind]
 
@@ -97,17 +101,17 @@ class Block(namedtuple('Block', ['pos', 'block_type'])):
     pass
 
 class Window(namedtuple('Window', ['pos', 'parent'])):
-    def descriptions(self, top=False):
+    def descriptions(self, top=False, mentioned=[]):
         yield 'a window'
         if top:
-            for desc in self.parent[0].descriptions():
+            for desc in self.parent[0].descriptions(mentioned=mentioned+[self]):
                 yield 'a window in %s' % desc
 
 class Door(namedtuple('Door', ['pos', 'parent'])):
-    def descriptions(self, top=False):
+    def descriptions(self, top=False, mentioned=[]):
         yield 'a door'
         if top:
-            for desc in self.parent[0].descriptions():
+            for desc in self.parent[0].descriptions(mentioned=mentioned+[self]):
                 yield 'a door in %s' % desc
         
 
@@ -230,18 +234,18 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'wall_blocks', 'window', 'do
         return Wall(self.pos, self.block_type, self.wall_blocks+tuple(nblocks),
                 window, door, self.height), count
 
-    def descriptions(self, top=False):
+    def descriptions(self, top=False, mentioned=[]):
         def self_descs():
             yield 'a wall'
             for desc in self.block_type.descriptions():
                 yield 'a %s wall' % desc
         for desc in self_descs():
             yield desc
-            if self.window is not None:
-                for w_desc in self.window.descriptions():
+            if self.window is not None and self.window not in mentioned:
+                for w_desc in self.window.descriptions(mentioned=mentioned+[self]):
                     yield '%s with %s' % (desc, w_desc)
-            if self.door is not None:
-                for d_desc in self.door.descriptions():
+            if self.door is not None and self.door not in mentioned:
+                for d_desc in self.door.descriptions(mentioned=mentioned+[self]):
                     yield '%s with %s' % (desc, d_desc)
 
 class House(namedtuple('House', ['pos', 'walls', 'roof', 'block_type'])):
@@ -300,15 +304,15 @@ class House(namedtuple('House', ['pos', 'walls', 'roof', 'block_type'])):
                 walls.append(nwall)
         return House(self.pos, walls, self.roof, self.block_type), count
 
-    def descriptions(self, top=False):
+    def descriptions(self, top=False, mentioned=[]):
         yield 'a house'
         if self.block_type is not None:
-            for desc in self.block_type.descriptions():
+            for desc in self.block_type.descriptions(mentioned=mentioned+[self]):
                 yield 'a %s house' % desc
         for part in self.parts():
-            if part is self:
+            if part is self or part in mentioned:
                 continue
-            for desc in part.descriptions():
+            for desc in part.descriptions(mentioned=mentioned+[self]):
                 yield 'a house with %s' % desc
 
 class Scene(object):
@@ -316,13 +320,12 @@ class Scene(object):
     _max_walls = 3
     _max_blocks = 4
     _max_trees = 4
-    _size = (25, 25, 25)
+    _size = (25, 10, 25)
 
     @classmethod
     def sample(cls):
         n_houses = np.random.randint(cls._max_houses + 1)
         n_walls = (0 if n_houses == 1 else 1) + np.random.randint(cls._max_walls)
-        #n_blocks = np.random.randint(cls._max_blocks + 1)
         n_trees = np.random.randint(cls._max_trees)
 
         scene = cls.empty()
@@ -331,8 +334,8 @@ class Scene(object):
         scene = scene.add_walls(n_walls)
         for _ in range(n_trees):
             scene = scene.add_tree()
-        #for _ in range(n_blocks):
-        #    Scene = scene.add_block()
+        for block_type in BlockType.enumerate():
+            scene = scene.add_block(block_type)
         return scene
 
     @classmethod
@@ -398,13 +401,32 @@ class Scene(object):
                 occupied[pos] = 1
             return Scene(self.size, parts, occupied)
 
+    def add_block(self, block_type):
+        for _ in range(MAX_TRIES):
+            x = np.random.randint(self.size[0])
+            y = 0
+            z = np.random.randint(self.size[2])
+            pos = (x, y, z)
+            if self.occupied[pos]:
+                continue
+            block = Block(pos, block_type)
+            parts = self._parts + (block,)
+            occupied = self.occupied.copy()
+            occupied[pos] = 1
+            return Scene(self.size, parts, occupied)
+
     def blocks(self):
         for part in self._parts:
-            for block in part.blocks():
-                yield block
+            if isinstance(part, Block):
+                yield part
+            else:
+                for block in part.blocks():
+                    yield block
 
     def parts(self):
         for part in self._parts:
+            if isinstance(part, Block):
+                continue
             for subpart in part.parts():
                 yield subpart
 
@@ -415,21 +437,26 @@ class Scene(object):
             if part == rem:
                 count += 1
             else:
-                npart, ncount = part.remove(rem)
+                # TODO clean this up
+                if isinstance(part, Block):
+                    npart, ncount = part, 0
+                else:
+                    npart, ncount = part.remove(rem)
                 count += ncount
                 parts.append(npart)
         assert count == 1, 'removed %d copies of %s' % (count, rem)
 
         occupied = np.zeros(self.size)
         for part in parts:
-            for block in part.blocks():
+            blocks = [part] if isinstance(part, Block) else part.blocks()
+            for block in blocks:
                 assert occupied[block.pos] == 0, \
                         '%s space already occupied when removing %s' % (part, rem)
                 occupied[block.pos] = 1
 
         return Scene(self.size, parts, occupied)
 
-    def dump(self, fp):
+    def dump(self, fh):
         voxels = np.zeros(self.size, dtype=np.int32)
         for block in self.blocks():
             voxels[block.pos] = block.block_type.mat_id()
@@ -438,5 +465,5 @@ class Scene(object):
             #'dimensions': self.size,
             'position': (0, 1, 0)
         }
-        json.dump(data, fp)
+        json.dump(data, fh)
 
