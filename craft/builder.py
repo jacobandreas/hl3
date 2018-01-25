@@ -114,7 +114,6 @@ class Door(namedtuple('Door', ['pos', 'parent'])):
             for desc in self.parent[0].descriptions(mentioned=mentioned+[self]):
                 yield 'a door in %s' % desc
         
-
 class Roof(namedtuple('Roof', ['pos', 'roof_blocks'])):
     _block_types = [
         BlockType('wood'),
@@ -141,7 +140,35 @@ class Roof(namedtuple('Roof', ['pos', 'roof_blocks'])):
         for block in self.roof_blocks:
             yield block
 
-class Wall(namedtuple('Wall', ['pos', 'block_type', 'wall_blocks', 'window', 'door', 'height'])):
+class Course(namedtuple('Course', ['pos', 'block_type', 'course_blocks'])):
+    def __repr__(self):
+        return 'Course(pos=%r, block_type=%r)'
+
+    @classmethod
+    def sample(cls, pos, angle, length, block_type):
+        x, y, z = pos
+        blocks = []
+        for l in range(length):
+            if angle == Wall.NS:
+                bx = x
+                bz = z + l
+            elif angle == Wall.EW:
+                bx = x + l
+                bz = z
+            block = Block((bx, y, bz), block_type)
+            blocks.append(block)
+        return Course(pos, block_type, blocks)
+
+    def descriptions(self, top=False):
+        yield "a course"
+        for desc in self.block_type.descriptions():
+            yield "a %s course" % desc
+
+    def blocks(self):
+        for block in self.course_blocks:
+            yield block
+
+class Wall(namedtuple('Wall', ['pos', 'block_type', 'courses', 'window', 'door', 'height', 'incomplete'])):
     NS = 0
     EW = 1
 
@@ -154,16 +181,21 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'wall_blocks', 'window', 'do
     ]
 
     def __repr__(self):
-        return 'Wall(pos=%r, block_type=%r, window=%r, door=%r, height=%r)' % (
-                self.pos, self.block_type, self.window, self.door, self.height)
+        return 'Wall(pos=%r, block_type=%r, window=%r, door=%r, height=%r, inc=%r)' % (
+                self.pos, self.block_type, self.window, self.door, self.height,
+                self.incomplete)
 
     @classmethod
-    def sample(cls, pos, angle, length, height, block_type = None):
+    def sample(cls, pos, angle, length, height, block_type=None, incomplete=False):
         x, y, z = pos
         if block_type is None:
             block_type = cls._block_types[np.random.choice(len(cls._block_types))]
         n_windows = np.random.randint(cls._max_windows + 1)
         n_doors = np.random.randint(cls._max_doors + 1)
+
+        course_height = height
+        if incomplete:
+            course_height = np.random.randint(1, height)
 
         if angle == Wall.NS:
             window_x = x
@@ -176,26 +208,31 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'wall_blocks', 'window', 'do
             door_x = x + length // 2
             door_z = z
 
-        window = Window((window_x, y, window_z), []) if n_windows == 1 else None
+        window = Window((window_x, y+height-2, window_z), []) if n_windows == 1 else None
         door = Door((door_x, y, door_z), []) if n_doors == 1 else None
 
-        blocks = []
-        for l in range(length):
-            for h in range(height):
-                if window is not None and l == length - 2 and h == height - 2:
-                    continue
-                if door is not None and l == length // 2 and h < 2:
-                    continue
-                by = y + h
-                if angle == Wall.NS:
-                    bx = x
-                    bz = z + l
-                elif angle == Wall.EW:
-                    bx = x + l
-                    bz = z
-                block = Block((bx, by, bz), block_type)
-                blocks.append(block)
-        wall = Wall(pos, block_type, tuple(blocks), window, door, height)
+        courses = []
+        for h in range(course_height):
+            course = Course.sample((x, y+h, z), angle, length, block_type)
+            courses.append(course)
+        #blocks = []
+        #for l in range(length):
+        #    for h in range(height):
+        #        if window is not None and l == length - 2 and h == height - 2:
+        #            continue
+        #        if door is not None and l == length // 2 and h < 2:
+        #            continue
+        #        by = y + h
+        #        if angle == Wall.NS:
+        #            bx = x
+        #            bz = z + l
+        #        elif angle == Wall.EW:
+        #            bx = x + l
+        #            bz = z
+        #        block = Block((bx, by, bz), block_type)
+        #        blocks.append(block)
+        #wall = Wall(pos, block_type, tuple(blocks), window, door, height)
+        wall = Wall(pos, block_type, tuple(courses), window, door, course_height, incomplete)
 
         # TODO YIKES
         if window is not None:
@@ -206,11 +243,19 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'wall_blocks', 'window', 'do
         return wall
 
     def blocks(self):
-        for block in self.wall_blocks:
-            yield block
+        for course in self.courses:
+            for block in course.course_blocks:
+                if self.window is not None and block.pos == self.window.pos:
+                    continue
+                if self.door is not None:
+                    dx, dy, dz = self.door.pos
+                    if block.pos == (dx, dy, dz) or block.pos == (dx, dy+1, dz):
+                        continue
+                yield block
 
     def parts(self):
         yield self
+        yield self.courses[-1]
         if self.door is not None:
             yield self.door
         if self.window is not None:
@@ -220,19 +265,20 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'wall_blocks', 'window', 'do
         count = 0
         window = self.window
         door = self.door
-        nblocks = []
+        ncourses = self.courses
         if self.window is not None and isinstance(rem, Window) and (rem == self.window):
             count += 1
             wx, wy, wz = self.window.pos
-            nblocks = [Block((wx, wy + self.height - 2, wz), self.block_type)]
             window = None
         if self.door is not None and isinstance(rem, Door) and (rem == self.door):
             count += 1
             dx, dy, dz = self.door.pos
-            nblocks = [Block((dx, dy + h, dz), self.block_type) for h in range(2)]
             door = None
-        return Wall(self.pos, self.block_type, self.wall_blocks+tuple(nblocks),
-                window, door, self.height), count
+        if isinstance(rem, Course) and rem == self.courses[-1]:
+            ncourses = self.courses[:-1]
+            count += 1
+        return Wall(self.pos, self.block_type, ncourses, window, door,
+                self.height, self.incomplete), count
 
     def descriptions(self, top=False, mentioned=[]):
         def self_descs():
@@ -241,6 +287,8 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'wall_blocks', 'window', 'do
                 yield 'a %s wall' % desc
         for desc in self_descs():
             yield desc
+            if self.incomplete:
+                continue
             if self.window is not None and self.window not in mentioned:
                 for w_desc in self.window.descriptions(mentioned=mentioned+[self]):
                     yield '%s with %s' % (desc, w_desc)
@@ -269,11 +317,15 @@ class House(namedtuple('House', ['pos', 'walls', 'roof', 'block_type'])):
         y = 0
         z = np.random.randint(s_depth - depth)
         walls = [
-            Wall.sample((x, y, z), Wall.EW, width, cls._height, block_type),
-            Wall.sample((x, y, z + depth - 1), Wall.EW, width, cls._height, block_type),
+            Wall.sample((x, y, z), Wall.EW, width, cls._height,
+                block_type=block_type),
+            Wall.sample((x, y, z + depth - 1), Wall.EW, width, cls._height,
+                block_type=block_type),
 
-            Wall.sample((x, y, z + 1), Wall.NS, depth - 2, cls._height, block_type),
-            Wall.sample((x + width - 1, y, z + 1), Wall.NS, depth - 2, cls._height, block_type)
+            Wall.sample((x, y, z + 1), Wall.NS, depth - 2, cls._height,
+                block_type=block_type),
+            Wall.sample((x + width - 1, y, z + 1), Wall.NS, depth - 2, cls._height,
+                block_type=block_type)
         ]
         roof = Roof.sample((x, y, z), width, cls._height, depth)
         return House((x, y, z), walls, roof, block_type)
@@ -318,15 +370,17 @@ class House(namedtuple('House', ['pos', 'walls', 'roof', 'block_type'])):
 class Scene(object):
     _max_houses = 2
     _max_walls = 3
-    _max_blocks = 4
     _max_trees = 4
+    #_max_houses = 0
+    #_max_walls = 3
+    #_max_trees = 0
     _size = (25, 10, 25)
 
     @classmethod
     def sample(cls):
-        n_houses = np.random.randint(cls._max_houses + 1)
+        n_houses = 0 if cls._max_houses == 0 else np.random.randint(cls._max_houses + 1)
         n_walls = (0 if n_houses == 1 else 1) + np.random.randint(cls._max_walls)
-        n_trees = np.random.randint(cls._max_trees)
+        n_trees = 0 if cls._max_trees == 0 else np.random.randint(cls._max_trees)
 
         scene = cls.empty()
         for _ in range(n_houses):
@@ -369,11 +423,16 @@ class Scene(object):
             x = np.random.randint(s_width - width)
             y = 0
             z = np.random.randint(s_depth - depth)
+            incomplete = np.random.randint(2, size=4)
             walls = [
-                Wall.sample((x, y, z), Wall.EW, width, height),
-                Wall.sample((x, y, z + depth - 1), Wall.EW, width, height),
-                Wall.sample((x, y, z + 1), Wall.NS, depth - 2, height),
-                Wall.sample((x + width - 1, y, z + 1), Wall.NS, depth - 2, height)
+                Wall.sample((x, y, z), Wall.EW, width, height,
+                    incomplete=incomplete[0]),
+                Wall.sample((x, y, z + depth - 1), Wall.EW, width, height,
+                    incomplete=incomplete[1]),
+                Wall.sample((x, y, z + 1), Wall.NS, depth - 2, height,
+                    incomplete=incomplete[2]),
+                Wall.sample((x + width - 1, y, z + 1), Wall.NS, depth - 2, height,
+                    incomplete=incomplete[3])
             ]
             wall_order = np.random.shuffle(walls)
             walls = walls[:n_walls]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from craft.builder import Block, BlockType, Scene, House
+from craft.builder import Block, BlockType, Scene, House, Window, Door, Wall, Course
 
 from collections import Counter, namedtuple
 import numpy as np
@@ -23,6 +23,20 @@ class CraftEnv(object):
     CLONE = 8
     STOP = 9
     n_actions = 10
+    n_features = 5 * 5 * 5 * 7 * 3 * 2 + 3 + (1 + len(BlockType.enumerate()))
+
+    _action_names = {
+        WEST: 'w',
+        EAST: 'e',
+        DOWN: 'd',
+        UP: 'u',
+        SOUTH: 's',
+        NORTH: 'n',
+        ADD: 'A',
+        REMOVE: 'R',
+        CLONE: 'C',
+        STOP: '.',
+    }
 
     @classmethod
     def sample_task(self):
@@ -34,13 +48,22 @@ class CraftEnv(object):
                 pass
         return task
 
+    @classmethod
+    def action_name(cls, action):
+        return cls._action_names[action]
+
 class CraftState(namedtuple('CraftState', ['blocks', 'orig_blocks', 'pos', 'mat'])):
     @classmethod
-    def from_scene(cls, scene, pos):
+    def from_scene(cls, scene, pos, mat):
         blocks = np.zeros(scene.size + (len(BlockType.enumerate()) + 1,))
         for block in scene.blocks():
             blocks[block.pos + (block.block_type.mat_id(),)] = 1
-        return CraftState(blocks, blocks, pos, 1)
+        #if mat is None:
+        #    mat = len(BlockType.enumerate()) + 1
+        return CraftState(blocks, blocks, pos, mat)
+
+    def with_init(self, state):
+        return self._replace(orig_blocks = state.blocks)
 
     def to_scene(self):
         size = self.blocks.shape[:3]
@@ -161,7 +184,7 @@ class CraftState(namedtuple('CraftState', ['blocks', 'orig_blocks', 'pos', 'mat'
         return np.concatenate((f0.ravel(), f1.ravel(), f2.ravel()))
 
     def features(self):
-        mat_features = np.zeros((len(BlockType.enumerate()),))
+        mat_features = np.zeros((1 + len(BlockType.enumerate()),))
         mat_features[self.mat] = 1
         return np.concatenate((
             self._block_features(self.blocks),
@@ -173,51 +196,86 @@ class Task(object):
     FIND = 0
     ADD = 1
     REMOVE = 2
+    CLONE = 3
 
     #_actions = [FIND, ADD, REMOVE]
-    _actions = [FIND, ADD, REMOVE]
+    _actions = [FIND, ADD, REMOVE, CLONE]
+    _action_probs = [0.3, 0.3, 0.3, 0.1]
     _action_names = {
         FIND: 'find',
         ADD: 'add',
-        REMOVE: 'remove'
+        REMOVE: 'remove',
+        CLONE: 'clone'
     }
 
     @classmethod
     def sample(cls):
         scene1 = Scene.sample()
         parts = list(scene1.parts())
-        parts = [p for p in parts if not isinstance(p, House)]
+        #part_filter = lambda x: not (isinstance(x, House) or isinstance(x,
+        #    Window) or isinstance(x, Door))
+        part_filter = lambda x: not isinstance(x, House)
+        parts = [p for p in parts if part_filter(p)]
         if len(parts) == 0:
             assert False
         part = parts[np.random.randint(len(parts))]
         scene2 = scene1.remove(part)
-        action = cls._actions[np.random.randint(len(cls._actions))]
-        descs = list(set(part.descriptions(top=True)))
-        desc = descs[np.random.randint(len(descs))]
+        action = np.random.choice(cls._actions, p=cls._action_probs)
 
-        if action == cls.FIND or action == cls.REMOVE:
+        descs = list(part.descriptions(top=True))
+        here = action in (cls.ADD, cls.REMOVE) and np.random.random() < 0.25
+        if here:
+            desc = descs[0]
+        else:
+            descs = list(set(descs))
+            desc = descs[np.random.randint(len(descs))]
+
+        if action == cls.FIND:
+            scene_before = scene_after = scene1
+            assert not here
+        elif action == cls.REMOVE:
             scene_before = scene1
             scene_after = scene2
-        else:
-            assert action == cls.ADD
+        elif action == cls.ADD:
             scene_before = scene2
             scene_after = scene1
+        elif action == cls.CLONE:
+            scene_before = scene_after = scene1
+            assert hasattr(part, 'blocks')
+            assert not here
+            blocks = list(part.blocks())
+            part = blocks[np.random.randint(len(blocks))]
+            desc = 'a ' + next(part.block_type.descriptions()) + ' block'
 
-        return Task(action, part, desc, scene_before, scene_after)
+        return Task(action, part, desc, scene_before, scene_after, here)
 
-    def __init__(self, action, part, desc, scene_before, scene_after):
+    def __init__(self, action, part, part_desc, scene_before, scene_after, here):
         self.action = action
         self.part = part
-        self._desc = desc
+        self._part_desc = part_desc
+        self.here = here
         self.desc = next(self._descriptions())
         self.scene_before = scene_before
         self.scene_after = scene_after
+        self.here = here
 
         init_pos = [np.random.randint(dim) for dim in self.scene_before.size]
-        self.init_state = CraftState.from_scene(self.scene_before, tuple(init_pos))
+        mat_ids = [b.mat_id() for b in BlockType.enumerate()]
+        init_mat = np.random.choice(mat_ids)
+        self.init_state = CraftState.from_scene(self.scene_before,
+                tuple(init_pos), init_mat)
+        if here:
+            demo = self.demonstration()
+            after_clone = [s_ for s, a, s_ in demo if a == CraftEnv.CLONE]
+            init_pos = part.pos
+            if len(after_clone) > 0:
+                init_mat = after_clone[0].mat
+        self.init_state = CraftState.from_scene(self.scene_before,
+                tuple(init_pos), init_mat)
 
     def _descriptions(self):
-        yield '%s %s' % (self._action_names[self.action], self._desc)
+        here = ' here' if self.here else ''
+        yield '%s %s%s' % (self._action_names[self.action], self._part_desc, here)
 
     def dump(self):
         with open('../vis/scene.json', 'w') as scene_f:
@@ -226,6 +284,8 @@ class Task(object):
     def demonstration(self):
         if self.action == self.FIND:
             demo, state = self._demonstrate_find(self.init_state)
+        elif self.action == self.CLONE:
+            demo, state = self._get_mat(self.init_state, self.part.block_type)
         else:
             demo, state = self._demonstrate_change(self.init_state)
         demo.append((state, CraftEnv.STOP, None))
@@ -237,10 +297,13 @@ class Task(object):
     def _demonstrate_change(self, state):
         blocks_before = set(self.scene_before.blocks())
         blocks_after = set(self.scene_after.blocks())
-        to_add = blocks_after - blocks_before
-        to_remove = blocks_before - blocks_after
+        #to_add = blocks_after - blocks_before
+        #to_remove = blocks_before - blocks_after
+        to_add = [b for b in self.scene_after.blocks() if b not in blocks_before]
+        to_remove = [b for b in self.scene_before.blocks() if b not in blocks_after]
+
         if len(to_remove) == 0:
-            remaining = to_add
+            remaining = list(reversed(to_add))
             add = True
         elif len(to_add) == 0:
             remaining = to_remove
@@ -250,12 +313,11 @@ class Task(object):
 
         demo = []
 
-        build_order = list(reversed(sorted(remaining, 
-                key=lambda x: (x.block_type.mat_id(), dist(x.pos, state.pos)))))
+        build_order = remaining
+        #build_order = list(reversed(sorted(remaining, 
+        #        key=lambda x: (x.block_type.mat_id(), dist(x.pos, state.pos)))))
 
         while len(build_order) > 0:
-            #nearest = min(remaining, key=lambda x: dist(x.pos, state.pos))
-            #remaining.remove(nearest)
             nearest = build_order.pop()
             if add and state.mat != nearest.block_type.mat_id():
                 ndemo, state = self._get_mat(state, nearest.block_type)

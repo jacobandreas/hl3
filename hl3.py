@@ -1,237 +1,356 @@
 #!/usr/bin/env python3
 
+from nav.task import NavEnv
 from craft.task import CraftEnv
-from craft.builder import BlockType
-from misc import hlog, util, fakeprof
+import data
+import ling
+from misc import fakeprof, hlog, util
+import training
 
-from collections import namedtuple
-import itertools
+from collections import Counter
+import itertools as it
 import logging
 import numpy as np
-import os
-import pickle
 import torch
-import torch.utils.data
+from torch.autograd import Variable
+import torch.utils.data as torch_data
 from tqdm import tqdm
 
-N_SETUP_EXAMPLES = 1000
-N_EXAMPLES = 10000
-N_BATCH_EXAMPLES = 10
-N_BATCH_STEPS = 500
-N_ROLLOUT_MAX = 1000
-N_EPOCHS = 100
-N_LOG = 50
-CACHE_DIR = '/data/jda/hl3/_cache'
+config = util.Struct()
+config.N_SETUP_EXAMPLES = 1000
+config.N_EXAMPLES = 20000
+config.N_BATCH_EXAMPLES = 10
+config.N_BATCH_STEPS = 50
+config.N_ROLLOUT_MAX = 1000
+config.N_EPOCHS = 20
+config.N_LOG = 100
+config.CACHE_DIR = '/data/jda/hl3/_cache'
+#config.CACHE_DIR = None
 
-UNK = 'UNK'
 
 ENV = CraftEnv
+#ENV = NavEnv
 
-vocab = util.Index()
-
-def tokenize(hint, index=False):
-    words = hint.lower().split()
-    if index:
-        toks = [vocab.index(w) for w in words]
-    else:
-        toks = [vocab[w] or vocab[UNK] for w in words]
-    assert None not in toks
-    return toks
-
-@hlog.fn('setup')
-def setup():
-    data = [ENV.sample_task() for _ in range(N_SETUP_EXAMPLES)]
-    vocab.index(UNK)
-    for datum in data:
-        print(datum.desc)
-        tokenize(datum.desc, index=True)
-    with hlog.task('data_size'):
-        hlog.log(len(data))
-    with hlog.task('vocab_size'):
-        hlog.log(len(vocab))
-
-Batch = namedtuple('Batch', ['desc', 'act', 'obs'])
-
-@profile
-def load_batch(tasks, actions, features):
-    desc = []
-    act = []
-    obs = []
-    for _ in range(N_BATCH_STEPS):
-        task_id = np.random.randint(len(tasks))
-        step_id = np.random.randint(len(actions[task_id]))
-        desc.append(tasks[task_id].desc)
-        act.append(actions[task_id][step_id])
-        obs.append(features[task_id][step_id])
-
-    # descs
-    proc_desc = [tokenize(d) for d in desc]
-    max_desc_len = max(len(d) for d in proc_desc)
-    desc_data = torch.zeros(max_desc_len, len(desc), len(vocab))
-    for i_desc, desc in enumerate(proc_desc):
-        for i_tok, tok in enumerate(desc):
-            desc_data[i_tok, i_desc, tok] = 1
-
-    act_data = torch.LongTensor(act)
-    obs_data = torch.FloatTensor(obs)
-    return Batch(
-            torch.autograd.Variable(desc_data),
-            torch.autograd.Variable(act_data),
-            torch.autograd.Variable(obs_data))
-
-@profile
-def rollout(model, task):
-    desc = tokenize(task.desc)
-    desc_data = torch.zeros(len(desc), 1, len(vocab))
-    for i, tok in enumerate(desc):
-        desc_data[i, 0, tok] = 1
-    desc_var = torch.autograd.Variable(desc_data.cuda())
-
-    state = task.init_state
-    steps = []
-    for _ in range(N_ROLLOUT_MAX):
-        obs_data = [state.features()]
-        obs_data = torch.FloatTensor(obs_data)
-        batch = Batch(
-                desc_var,
-                None,
-                torch.autograd.Variable(obs_data.cuda()))
-        action, = model.act(batch)
-        s_ = state.step(action)
-        steps.append((state, action, s_))
-        state = s_
-        if action == ENV.STOP:
-            break
-    return steps
-
-class Model(torch.nn.Module):
-    # TODO auto
-    N_OBS = 5 * 5 * 5 * 7 * 3 * 2 + 3 + len(BlockType.enumerate())
-    N_WORDVEC = 64
+class StateFeaturizer(torch.nn.Module):
+    N_OBS = ENV.n_features
     N_HIDDEN = 256
 
-    def __init__(self):
-        super(Model, self).__init__()
-        self.embed = torch.nn.Linear(len(vocab), self.N_WORDVEC)
-        self.rnn = torch.nn.GRU(
-            input_size=self.N_WORDVEC, hidden_size=self.N_HIDDEN, num_layers=1)
-
-        self.featurize = torch.nn.Sequential(
+    def __init__(self, dataset):
+        super(StateFeaturizer, self).__init__()
+        self.layers = torch.nn.Sequential(
             torch.nn.Linear(self.N_OBS, self.N_HIDDEN),
             torch.nn.ReLU(),
             torch.nn.Linear(self.N_HIDDEN, self.N_HIDDEN))
 
-        self.predict = torch.nn.Bilinear(self.N_HIDDEN, self.N_HIDDEN, ENV.n_actions)
-        self.log_softmax = torch.nn.LogSoftmax()
+    def forward(self, obs):
+        return self.layers(obs)
 
-    def forward(self, batch):
+class Policy(torch.nn.Module):
+    # TODO auto
+    N_WORDVEC = 64
+    N_HIDDEN = 256
+
+    def __init__(self, dataset):
+        super(Policy, self).__init__()
+        self.embed = torch.nn.Linear(len(dataset.vocab), self.N_WORDVEC)
+        self.rnn = torch.nn.GRU(
+            input_size=self.N_WORDVEC, hidden_size=self.N_HIDDEN, num_layers=1)
+
+        self.predict = torch.nn.Bilinear(self.N_HIDDEN, StateFeaturizer.N_HIDDEN, ENV.n_actions)
+        self.log_softmax = torch.nn.LogSoftmax(dim=1)
+
+    def forward(self, features, batch):
         emb = self.embed(batch.desc)
         _, enc = self.rnn(emb)
-        feats = self.featurize(batch.obs)
 
-        logits = self.predict(enc.squeeze(0), feats)
+        logits = self.predict(enc.squeeze(0), features)
         logprobs = self.log_softmax(logits)
         return logprobs
 
-    def act(self, batch):
-        probs = self.forward(batch).exp().data.cpu().numpy()
+    def act(self, features, batch):
+        probs = self(features, batch).exp().data.cpu().numpy()
         actions = []
         for row in probs:
             actions.append(np.random.choice(ENV.n_actions, p=row))
-            #actions.append(row.argmax())
         return actions
 
-class Dataset(torch.utils.data.Dataset):
-    def __init__(self, cache_dir):
-        with open(os.path.join(CACHE_DIR, 'tasks.pkl'), 'rb') as task_f:
-            self.tasks = pickle.load(task_f)
-        with open(os.path.join(CACHE_DIR, 'actions.pkl'), 'rb') as action_f:
-            self.actions = pickle.load(action_f)
-        assert len(self.tasks) == len(self.actions)
+class Splitter(torch.nn.Module):
+    def __init__(self, dataset):
+        super(Splitter, self).__init__()
+        self.predict = torch.nn.Linear(StateFeaturizer.N_HIDDEN, 1)
 
-    def __len__(self):
-        return len(self.tasks)
+    def forward(self, features, batch):
+        scores = self.predict(features).squeeze(2)
+        return scores
 
-    def __getitem__(self, i):
-        features = np.load(os.path.join(CACHE_DIR, 'features', 'path%d.npy' % i))
-        return self.tasks[i], self.actions[i], features
+class Decoder(torch.nn.Module):
+    N_HIDDEN = 256
 
-def get_dataset():
-    if os.path.exists(CACHE_DIR):
-        return Dataset(CACHE_DIR)
+    def __init__(self, dataset, start_sym, stop_sym):
+        super(Decoder, self).__init__()
+        self.vocab = dataset.vocab
+        self.start_sym = start_sym
+        self.stop_sym = stop_sym
+        # TODO switch to word embeddings / sparse?
+        self.emb = torch.nn.Linear(len(self.vocab), self.N_HIDDEN)
+        self.rnn = torch.nn.GRU(
+            input_size=self.N_HIDDEN, hidden_size=self.N_HIDDEN, num_layers=1)
+        self.out = torch.nn.Linear(self.N_HIDDEN, len(self.vocab))
+        self.log_softmax = torch.nn.LogSoftmax(dim=1)
 
-    os.mkdir(CACHE_DIR)
-    tasks = [ENV.sample_task() for _ in range(N_EXAMPLES)]
-    demonstrations = [task.demonstration() for task in tasks]
-    actions = [[a for s, a, s_ in demo] for demo in demonstrations]
-    with open(os.path.join(CACHE_DIR, 'tasks.pkl'), 'wb') as task_f:
-        pickle.dump(tasks, task_f)
-    with open(os.path.join(CACHE_DIR, 'actions.pkl'), 'wb') as action_f:
-        pickle.dump(actions, action_f)
+    # TODO shape messiness
+    def forward(self, state, inp):
+        emb = self.emb(inp)
+        pre_out, state = self.rnn(emb, state)
+        label_logprobs = self.log_softmax(self.out(state[0]))
+        return state, label_logprobs
 
-    os.mkdir(os.path.join(CACHE_DIR, 'features'))
-    for i_task, task in tqdm(list(enumerate(tasks))):
-        demo = demonstrations[i_task]
-        features = []
-        for s, a, s_ in demo:
-            features.append(s.features())
-        np.save(
-            os.path.join(CACHE_DIR, 'features', 'path%d.npy' % i_task),
-            np.asarray(features))
+    def decode(self, state):
+        n_batch = state.data.shape[1]
+        start_id = self.vocab[self.start_sym]
+        out = [[start_id] for _ in range(n_batch)]
+        inp = [start_id for _ in range(n_batch)]
+        done = [False for _ in range(n_batch)]
+        for _ in range(20):
+            hot_inp = np.zeros((1, n_batch, len(self.vocab)))
+            for i, t in enumerate(inp):
+                hot_inp[0, i, t] = 1
+            hot_inp = Variable(torch.FloatTensor(hot_inp)).cuda() # TODO !!!
+            new_state, label_logprobs = self(state, hot_inp)
+            new_inp = []
+            label_data = label_logprobs.data.cpu().numpy()
+            for i, probs in enumerate(label_data):
+                #choice = np.random.choice(len(self.vocab), p=np.exp(probs))
+                choice = probs.argmax()
+                new_inp.append(choice)
+                if not done[i]:
+                    out[i].append(choice)
+                done[i] = done[i] or choice == self.vocab[self.stop_sym]
+            state = new_state
+            inp = new_inp
+        return out
 
-    return Dataset(CACHE_DIR)
+class Model(object):
+    def __init__(self, dataset):
+        self.featurizer = StateFeaturizer(dataset).cuda()
+        self.policy = Policy(dataset).cuda()
+        self.splitter = Splitter(dataset).cuda()
+        self.describer = Decoder(dataset, ling.START, ling.STOP).cuda()
 
-def validate(model):
-    eval_task = ENV.sample_task()
-    steps = rollout(model, eval_task)
-    actions = [s[1] for s in steps]
-    last_state = steps[-1][0]
-    last_scene = last_state.to_scene()
-    hlog.value('desc', eval_task.desc)
-    hlog.value('sampled', ' '.join(str(a) for a in actions))
-    hlog.value('gold', ' '.join(str(a) for s, a, s_ in eval_task.demonstration()))
-    with open('vis/before.json', 'w') as scene_f:
-        eval_task.scene_before.dump(scene_f)
-    with open('vis/after.json', 'w') as scene_f:
-        last_scene.dump(scene_f)
-    with open('vis/after_gold.json', 'w') as scene_f:
-        eval_task.scene_after.dump(scene_f)
+        self.policy_obj = torch.nn.NLLLoss().cuda()
+        self.describer_obj = torch.nn.NLLLoss().cuda()
+
+        self.params = it.chain(
+            self.featurizer.parameters(), self.policy.parameters(),
+            self.splitter.parameters(), self.describer.parameters())
+
+        self.opt = torch.optim.Adam(self.params, lr=0.001)
+
+        self.dataset = dataset
+
+    def evaluate(self, pol_batch, seg_batch, train=False):
+        # policy
+        features = self.featurizer(pol_batch.obs)
+        #print('good')
+        #print(features.shape)
+        #print(pol_batch.desc.shape)
+        #print(pol_batch.act.shape)
+        preds = self.policy(features, pol_batch)
+        pol_loss = self.policy_obj(preds, pol_batch.act)
+
+        # splitter
+        seg_features = self.featurizer(seg_batch.obs)
+        split_scores = self.splitter(seg_features, seg_batch)
+        # TODO make a module
+        baselines = split_scores.gather(1, seg_batch.final[:, np.newaxis])
+        baselined_scores = split_scores - baselines
+        augmented_scores = baselined_scores + seg_batch.loss
+        margin_losses = torch.nn.functional.relu(augmented_scores)
+        bottoms, _ = split_scores.min(1, keepdim=True)
+        bottomed_scores = split_scores - bottoms
+        split_loss = margin_losses.mean() + .1 * bottomed_scores.mean()
+        split_pred_final = split_scores.data.cpu().numpy().argmax(axis=1)
+        split_acc = (split_pred_final == seg_batch.final.data.cpu().numpy()).mean()
+
+        # describer
+        desc_len = seg_batch.desc.data.shape[0]
+        indices = seg_batch.final[:, np.newaxis, np.newaxis]
+        desc_features = self.featurizer(seg_batch.last_obs)
+        desc_state = desc_features[np.newaxis, ...]
+        desc_loss = 0
+        for i in range(desc_len - 1):
+            desc_state, word_logprobs = self.describer(
+                    desc_state, seg_batch.desc[np.newaxis, i, ...])
+            desc_loss += self.describer_obj(word_logprobs, seg_batch.desc_target[i])
+
+        if train:
+            loss = pol_loss + split_loss + desc_loss
+            self.opt.zero_grad()
+            loss.backward()
+            self.opt.step()
+
+        pol_score = pol_loss.data.cpu().numpy()[0]
+        split_score = split_loss.data.cpu().numpy()[0]
+        desc_score = desc_loss.data.cpu().numpy()[0]
+        return Counter({
+            'pol_nll': pol_score,
+            'split_loss': split_score,
+            'split_acc': split_acc,
+            'desc_nll': desc_score,
+        })
+
+    def act(self, pol_batch):
+        features = self.featurizer(pol_batch.obs)
+        return self.policy.act(features, pol_batch)
+
+    def parse(self, seg_batch):
+        assert len(seg_batch.tasks) == 1
+        demo = seg_batch.tasks[0].demonstration()
+        actions = [a for s, a, s_ in demo]
+
+        # TODO probably move to data
+        feature_cache = {}
+        def featurize_from(lo):
+            if lo in feature_cache:
+                return feature_cache[lo]
+            state_before = demo[lo][0]
+            features = [None] * len(demo)
+            for i in range(lo, len(demo)):
+                state_after = demo[i][0]
+                state = state_after.with_init(state_before)
+                features[i] = state.features()
+            feature_cache[lo] = features
+            return features
+
+        #feature_cache = {}
+        #def desc_split(lo, hi, depth):
+        #    if lo not in feature_cache:
+        #        feature_cache[lo] = featurize_from(lo)
+        #    features = feature_cache[lo][lo:hi+1]
+        #    split_batch = data.SegmentBatch(
+        #        None, None,
+        #        Variable(torch.FloatTensor([features])).cuda(),
+        #        Variable(torch.FloatTensor([features[-1]])).cuda(),
+        #        None, None, None)
+        #    last_obs_feats = self.featurizer(split_batch.last_obs)
+
+        #    print(features[-1])
+
+        #    desc = self.describer.decode(last_obs_feats[np.newaxis, ...])[0]
+        #    desc = ' '.join(self.dataset.vocab.get(t) for t in desc)
+        #    if depth == 0:
+        #        return ((lo, hi), desc)
+
+        #    obs_feats = self.featurizer(split_batch.obs)
+        #    split_scores = self.splitter(obs_feats, split_batch)
+        #    print(split_scores)
+        #    split = lo + split_scores.data.cpu().numpy().ravel()[:-1].argmax()
+        #    return (
+        #        (lo, hi),
+        #        desc,
+        #        desc_split(lo, split, depth-1),
+        #        desc_split(split, hi, depth-1))
+
+        def desc_split(lo, hi, depth):
+            assert hi > lo
+            features_before = featurize_from(lo)
+
+            candidates = []
+
+            for split in range(lo + 1, hi - 1):
+                features_after = featurize_from(split)
+
+                before_batch = data.SegmentBatch(
+                    None, None, None,
+                    Variable(torch.FloatTensor([features_before[split]])).cuda(),
+                    None, None, None)
+
+                after_batch = data.SegmentBatch(
+                    None, None, None,
+                    Variable(torch.FloatTensor([features_after[hi]])).cuda(),
+                    None, None, None)
+
+                obs_feats_before = self.featurizer(before_batch.last_obs)
+                obs_feats_after = self.featurizer(after_batch.last_obs)
+
+                desc_before = self.describer.decode(obs_feats_before[np.newaxis, ...])[0]
+                desc_after = self.describer.decode(obs_feats_after[np.newaxis, ...])[0]
+                hot_desc_before = np.zeros((len(desc_before), split-lo+1, len(self.dataset.vocab)))
+                hot_desc_after = np.zeros((len(desc_after), hi-split+1, len(self.dataset.vocab)))
+                for i in range(len(desc_before)):
+                    hot_desc_before[i, :, desc_before[i]] = 1
+                for i in range(len(desc_after)):
+                    hot_desc_after[i, :, desc_after[i]] = 1
+
+                before_pol_batch = data.PolicyBatch(
+                    Variable(torch.FloatTensor(hot_desc_before)).cuda(),
+                    None,
+                    Variable(torch.FloatTensor(features_before[lo:split+1])).cuda(),
+                    Variable(torch.LongTensor(actions[lo:split] + [self.dataset.env.STOP])).cuda(),
+                    None)
+
+                after_pol_batch = data.PolicyBatch(
+                    Variable(torch.FloatTensor(hot_desc_after)).cuda(),
+                    None,
+                    Variable(torch.FloatTensor(features_after[split:hi+1])).cuda(),
+                    Variable(torch.LongTensor(actions[split:hi] + [self.dataset.env.STOP])).cuda(),
+                    None)
+
+                before_feats = self.featurizer(before_pol_batch.obs)
+                after_feats = self.featurizer(after_pol_batch.obs)
+
+                #print('bad')
+                #print(before_feats.shape)
+                #print(before_pol_batch.desc.shape)
+                #print(before_pol_batch.act.shape)
+                #print(after_feats.shape)
+                #print(after_pol_batch.desc.shape)
+                #print(after_pol_batch.act.shape)
+                before_preds = self.policy(before_feats, before_pol_batch)
+                after_preds = self.policy(after_feats, after_pol_batch)
+
+                before_loss = self.policy_obj(before_preds, before_pol_batch.act)
+                after_loss = self.policy_obj(after_preds, after_pol_batch.act)
+                candidates.append((
+                    before_loss.data.cpu().numpy()[0] +
+                        after_loss.data.cpu().numpy()[0],
+                    (lo, split, hi),
+                    ' '.join(self.dataset.vocab.get(t) for t in desc_before),
+                    ' '.join(self.dataset.vocab.get(t) for t in desc_after)
+                ))
+                #print(before_loss, after_loss)
+            score, (lo, split, hi), desc1, desc2 = max(candidates, key=lambda x: x[0])
+            return [((lo, split), desc1), ((split, hi), desc2)]
+
+        return desc_split(0, len(demo)-1, 1)
 
 @profile
 def main():
-    setup()
-    model = Model().cuda()
-    objective = torch.nn.NLLLoss().cuda()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     np.random.seed(0)
-    dataset = get_dataset()
+    dataset, val_dataset, parse_ex = data.get_dataset(ENV, config)
+    model = Model(dataset)
 
-    def collate(items):
-        tasks, actions, features = zip(*items)
-        return load_batch(tasks, actions, features)
-
-    loader = torch.utils.data.DataLoader(
-            dataset, batch_size=N_BATCH_EXAMPLES, shuffle=True, num_workers=2,
-            collate_fn=collate)
+    loader = torch_data.DataLoader(
+        dataset, batch_size=config.N_BATCH_EXAMPLES, shuffle=True, 
+        num_workers=4,
+        collate_fn=lambda items: data.collate(items, dataset, config))
 
     with hlog.task('train'):
-        curr_loss = 0
+        stats = Counter()
         i_iter = 0
-        for i_epoch in hlog.loop('epoch_%05d', range(N_EPOCHS)):
-            for i_batch, batch in hlog.loop('batch_%05d', enumerate(loader)):
-                if i_iter > 0 and i_iter % N_LOG == 0:
-                    hlog.value('loss', curr_loss / N_LOG)
-                    curr_loss = 0
-                    validate(model)
+        for i_epoch in hlog.loop('epoch_%05d', range(config.N_EPOCHS)):
+            for i_batch, (pol_batch, seg_batch) in hlog.loop('batch_%05d', enumerate(loader)):
+                if i_iter > 0 and i_iter % config.N_LOG == 0:
+                    for k, v in stats.items():
+                        hlog.value(k, v / config.N_LOG)
+                    with hlog.task('val'):
+                        training.validate(model, val_dataset, parse_ex, ENV, config)
+                    stats = Counter()
 
-                batch = Batch(
-                        batch.desc.cuda(), batch.act.cuda(), batch.obs.cuda())
-                logprobs = model(batch)
-                loss = objective(logprobs, batch.act)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                curr_loss += loss.data.cpu().numpy()[0]
+                pol_batch = pol_batch.cuda()
+                seg_batch = seg_batch.cuda()
+                stats += model.evaluate(pol_batch, seg_batch, train=True)
+
                 i_iter += 1
 
 if __name__ == '__main__':
