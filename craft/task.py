@@ -38,11 +38,18 @@ class CraftEnv(object):
         STOP: '.',
     }
 
+    ALLOWED = set([
+        'add a blue course',
+        'clone a blue block',
+        'add a course'])
+
     @classmethod
     def sample_task(self):
         while True:
             try:
                 task = Task.sample()
+                ###if task.desc not in self.ALLOWED:
+                ###    continue
                 break
             except AssertionError as e:
                 pass

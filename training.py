@@ -70,7 +70,7 @@ def validate(model, dataset, parse_ex, env, config):
         parse = model.parse(seg_batch.cuda())
         hlog.value('result', parse)
         #split = parse[2][0][1]
-        split = parse[0][0][1]
-        hlog.value('actions', (
-            ' '.join(env.action_name(a) for a in parse_ex[1][:split]), 
-            ' '.join(env.action_name(a) for a in parse_ex[1][split:])))
+        #split = parse[0][0][1]
+        #hlog.value('actions', (
+        #    ' '.join(env.action_name(a) for a in parse_ex[1][:split]), 
+        #    ' '.join(env.action_name(a) for a in parse_ex[1][split:])))
