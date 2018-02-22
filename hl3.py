@@ -12,18 +12,20 @@ import numpy as np
 import torch.utils.data as torch_data
 
 config = util.Struct()
-config.N_SETUP_EXAMPLES = 1000
-config.N_EXAMPLES = 20000
-###config.N_SETUP_EXAMPLES = 100
-###config.N_EXAMPLES = 2000
+###config.N_SETUP_EXAMPLES = 1000
+###config.N_EXAMPLES = 20000
+config.N_SETUP_EXAMPLES = 100
+config.N_EXAMPLES = 2000
 config.N_BATCH_EXAMPLES = 10
 config.N_BATCH_STEPS = 50
 config.N_ROLLOUT_MAX = 1000
 config.N_EPOCHS = 20
 config.N_LOG = 100
-config.CACHE_DIR = '/data/jda/hl3/_cache'
+#config.CACHE_DIR = '/data/jda/hl3/_cache'
+config.CACHE_DIR = '_cache'
 ###config.CACHE_DIR = '/data/jda/hl3/_debug_cache'
 #config.CACHE_DIR = None
+config.GPU = False
 
 ENV = CraftEnv
 #ENV = NavEnv
@@ -38,7 +40,7 @@ def _log(stats):
 def main():
     np.random.seed(0)
     dataset, val_dataset, parse_ex = data.get_dataset(ENV, config)
-    model = Model(ENV, dataset)
+    model = Model(ENV, dataset, config)
 
     loader = torch_data.DataLoader(
         dataset, batch_size=config.N_BATCH_EXAMPLES, shuffle=True, 
@@ -52,7 +54,7 @@ def main():
             for i_batch, batch in hlog.loop('batch_%05d', enumerate(loader)):
                 seq_batch = data.SeqBatch.of(batch, dataset, config)
                 parses = model.parse(seq_batch)
-                step_batch = data.StepBatch.of(batch, parses)
+                step_batch = data.StepBatch.of(batch, parses, dataset, config)
 
                 stats += model.train_policy(step_batch)
                 stats += model.train_helpers(seq_batch)

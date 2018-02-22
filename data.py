@@ -30,11 +30,11 @@ class SeqBatch(namedtuple('SeqBatch',
         ['desc', 'desc_target', 'obs', 'seq_obs', 'tasks'])):
 
     def cuda(self):
-        return SeqBatch(
-            self.desc.cuda(), self.desc_target.cuda(), self.obs.cuda(),
-            self.stop.cuda())
+        cu_args = [a.cuda() if a is not None else None for a in self]
+        return SeqBatch(*cu_args)
 
-    def of(batch, dataset, config):
+    @classmethod
+    def of(cls, batch, dataset, config):
         tasks, _, features = batch
 
         max_demo_len = max(f.shape[0] for f in features)
@@ -53,17 +53,36 @@ class SeqBatch(namedtuple('SeqBatch',
         obs_data = torch.FloatTensor(obs)
         seq_obs_data = torch.FloatTensor(seq_obs)
         return SeqBatch(
-                Variable(desc_data), Variable(desc_target_data),
-                Variable(obs_data), Variable(seq_obs_data),
-                tasks)
+            Variable(desc_data), Variable(desc_target_data), Variable(obs_data),
+            Variable(seq_obs_data), tasks)
 
 class StepBatch(namedtuple('StepBatch',
         ['obs', 'act', 'desc_in', 'desc_out_mask', 'desc_out', 'desc_out_target'])):
 
     def cuda(self):
+        cu_args = [a.cuda() if a is not None else None for a in self]
+        return SeqBatch(*cu_args)
+
+    @classmethod
+    def of(cls, batch, parses, dataset, config):
+        tasks, actions, features = batch
+
+        obs = []
+        act = []
+        desc_in = []
+        for _ in range(config.N_BATCH_STEPS):
+            i_task = np.random.randint(len(tasks))
+            i_step = np.random.randint(len(actions[i_task]))
+            obs.append(features[i_task][i_step])
+            act.append(actions[i_task][i_step])
+            desc_in.append(tasks[i_task].desc)
+
+        obs_data = torch.FloatTensor(obs)
+        act_data = torch.LongTensor(act)
+        desc_in_data = load_desc_data(desc_in, dataset)
         return StepBatch(
-            self.obs.cuda(), self.act.cuda(), self.desc_mask.cuda(),
-            self.desc.cuda(), self.desc_target.cuda())
+            Variable(obs_data), Variable(act_data), Variable(desc_in_data),
+            None, None, None)
 
 class DiskDataset(torch_data.Dataset):
     def __init__(self, cache_dir, n_batch, vocab, env,
@@ -168,8 +187,12 @@ def get_dataset(env, config):
             config.CACHE_DIR, config.N_BATCH_EXAMPLES, vocab, env,
             validation=True)
 
-    val_interesting = val_dataset[14]
-    assert val_interesting[0].desc == 'add a blue course'
+    val_interesting = None
+    for i in range(len(val_dataset)):
+        if val_dataset[i][0].desc == 'add a blue course':
+            val_interesting = val_dataset[i]
+            break
+    assert val_interesting is not None
 
     return (dataset, val_dataset, val_interesting)
 

@@ -48,8 +48,8 @@ class CraftEnv(object):
         while True:
             try:
                 task = Task.sample()
-                ###if task.desc not in self.ALLOWED:
-                ###    continue
+                if task.desc not in self.ALLOWED:
+                    continue
                 break
             except AssertionError as e:
                 pass
