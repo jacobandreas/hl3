@@ -59,7 +59,7 @@ class CraftEnv(object):
     def action_name(cls, action):
         return cls._action_names[action]
 
-class CraftState(namedtuple('CraftState', ['blocks', 'orig_blocks', 'pos', 'mat'])):
+class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
     @classmethod
     def from_scene(cls, scene, pos, mat):
         blocks = np.zeros(scene.size + (len(BlockType.enumerate()) + 1,))
@@ -67,10 +67,7 @@ class CraftState(namedtuple('CraftState', ['blocks', 'orig_blocks', 'pos', 'mat'
             blocks[block.pos + (block.block_type.mat_id(),)] = 1
         #if mat is None:
         #    mat = len(BlockType.enumerate()) + 1
-        return CraftState(blocks, blocks, pos, mat)
-
-    def with_init(self, state):
-        return self._replace(orig_blocks = state.blocks)
+        return CraftState(blocks, pos, mat)
 
     def to_scene(self):
         size = self.blocks.shape[:3]
@@ -195,7 +192,6 @@ class CraftState(namedtuple('CraftState', ['blocks', 'orig_blocks', 'pos', 'mat'
         mat_features[self.mat] = 1
         return np.concatenate((
             self._block_features(self.blocks),
-            self._block_features(self.orig_blocks),
             mat_features,
             np.asarray(self.pos) / np.asarray(self.blocks.shape[:3])))
 
