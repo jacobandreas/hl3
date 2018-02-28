@@ -92,6 +92,7 @@ class Decoder(nn.Module):
             if init_state.is_cuda:
                 hot_inp = hot_inp.cuda()
             new_state, label_logits = self(state, hot_inp)
+            label_logits = label_logits.squeeze(1)
             label_probs = self._softmax(label_logits)
             label_probs = label_probs.data.cpu().numpy()
             new_tok_inp = []
@@ -119,7 +120,7 @@ class TopDownParser(object):
         demos = [task.demonstration() for task in seq_batch.tasks]
 
         feature_cache = {}
-        for d in range(len(demos)):
+        for d in range(1): #range(len(demos)):
             demo = demos[d]
             for i in range(len(demo)):
                 state_before, _, _ = demo[i]
@@ -144,8 +145,8 @@ class TopDownParser(object):
                 Variable(torch.FloatTensor(hot_desc)),
                 None, None, None)
             rep = self._featurizer(step_batch.obs)
-            preds, _ = self._policy(rep, step_batch)
-            score = self._policy_prob(preds, step_batch.act)
+            act_logits, _ = self._policy(rep, step_batch)
+            score = self._policy_prob(act_logits, step_batch.act)
             return score
 
         def propose_desc(d, i, j, n):
@@ -160,10 +161,11 @@ class TopDownParser(object):
             return ' '.join(self._dataset.vocab.get(t) for t in desc)
 
         for d, demo in enumerate(demos):
+            if len(demo) < 3:
+                break
             descs = []
             scores = []
             splits = list(range(1, len(demo)-1))
-            assert len(demo) >= 3
             for k in splits:
                 desc1, = propose_desc(d, 0, k, 1)
                 desc2, = propose_desc(d, k, len(demo)-1, 1)
@@ -176,6 +178,7 @@ class TopDownParser(object):
             i_split = np.asarray(scores).argmin()
             split = splits[i_split]
             d1, d2 = descs[i_split]
+            print(seq_batch.tasks[d].desc)
             print(render(d1), render(d2))
             break
 
@@ -210,8 +213,8 @@ class Model(object):
 
     def train_policy(self, step_batch):
         rep = self._featurizer(step_batch.obs)
-        preds, _ = self._policy(rep, step_batch)
-        loss = self._policy_obj(preds, step_batch.act)
+        act_logits, _ = self._policy(rep, step_batch)
+        loss = self._policy_obj(act_logits, step_batch.act)
         self._opt.zero_grad()
         loss.backward()
         self._opt.step()
@@ -219,6 +222,13 @@ class Model(object):
 
     def train_helpers(self, seq_batch):
         rep = self._featurizer(seq_batch.seq_obs)
-        _, desc_probs = self._describer(rep.unsqueeze(0), seq_batch.desc)
-        print(desc_probs.shape)
-        exit()
+        _, desc_logits = self._describer(rep.unsqueeze(0), seq_batch.desc)
+        n_tok, n_batch, n_pred = desc_logits.shape
+        desc_loss = self._describer_obj(
+            desc_logits.view(n_tok * n_batch, n_pred),
+            seq_batch.desc_target.view(n_tok * n_batch))
+        loss = desc_loss
+        self._opt.zero_grad()
+        loss.backward()
+        self._opt.step()
+        return Counter({'desc_loss': desc_loss.data.cpu().numpy()[0]})
