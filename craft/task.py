@@ -39,8 +39,8 @@ class CraftEnv(object):
     }
 
     ALLOWED = set([
-        'add a blue course',
-        'clone a blue block',
+        'add a wood course',
+        'clone a wood block',
         'add a course'])
 
     @classmethod
@@ -48,8 +48,8 @@ class CraftEnv(object):
         while True:
             try:
                 task = Task.sample()
-                if task.desc not in self.ALLOWED:
-                    continue
+                #if task.desc not in self.ALLOWED:
+                #    continue
                 break
             except AssertionError as e:
                 pass

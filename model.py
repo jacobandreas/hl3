@@ -115,7 +115,7 @@ class Decoder(nn.Module):
         return out
 
 class TopDownParser(object):
-    def __init__(self, model, env, dataset):
+    def __init__(self, model, env, dataset, config):
         self._featurizer = model._featurizer
         self._policy = model._policy
         self._policy_prob = model._policy_prob
@@ -142,14 +142,15 @@ class TopDownParser(object):
 
             # TODO Batch.of_x
             step_batch = data.StepBatch(
-                #Variable(torch.FloatTensor(init_feats)),
-                #Variable(torch.FloatTensor(feats)),
                 init_feats,
                 feats,
                 Variable(torch.LongTensor(actions)),
                 None,
                 Variable(torch.FloatTensor(hot_desc)),
                 None, None, None)
+            if next(self._policy.parameters()).is_cuda:
+                step_batch = step_batch.cuda()
+
             rep = self._featurizer(step_batch.init_obs, step_batch.obs)
             act_logits, _ = self._policy(rep, step_batch)
             score = self._policy_prob(act_logits, step_batch.act)
@@ -182,9 +183,8 @@ class TopDownParser(object):
                 break
             descs = []
             scores = []
-            splits = list(range(1, len(demo)-1))
             # TODO magic
-            #splits = propose_splits(d, 10).data.cpu().numpy()
+            splits = propose_splits(d, 5).data.cpu().numpy()
             for k in splits:
                 desc1, = propose_desc(d, 0, k, 1)
                 desc2, = propose_desc(d, k, len(demo)-1, 1)
@@ -198,9 +198,9 @@ class TopDownParser(object):
             split = splits[i_split]
             d1, d2 = descs[i_split]
             actions = [t[1] for t in demo]
-            print(seq_batch.tasks[d].desc)
-            print(actions[:split], actions[split:])
-            print(render(d1), render(d2))
+            #print(seq_batch.tasks[d].desc)
+            #print(actions[:split], actions[split:])
+            #print(render(d1), render(d2))
             #break
 
 class Model(object):
@@ -216,18 +216,18 @@ class Model(object):
         self._describer_obj = nn.CrossEntropyLoss()
         self._segmenter_obj = nn.BCEWithLogitsLoss()
 
-        self._parser = TopDownParser(self, env, dataset)
-
         if config.GPU:
             for module in [
                     self._featurizer, self._policy, self._flat_policy,
-                    self._describer, self._parser, self._policy_obj,
-                    self._policy_prob, self._describer_obj]:
+                    self._describer, self._segmenter, self._policy_obj,
+                    self._policy_prob, self._describer_obj, self._segmenter_obj]:
                 module.cuda()
+
+        self._parser = TopDownParser(self, env, dataset, config)
 
         params = it.chain(
             self._featurizer.parameters(), self._policy.parameters(),
-            self._describer.parameters())
+            self._describer.parameters(), self._segmenter.parameters())
         # TODO magic
         self._opt = optim.Adam(params, lr=0.001)
 
