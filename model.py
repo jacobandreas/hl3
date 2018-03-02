@@ -15,12 +15,12 @@ class StateFeaturizer(nn.Module):
         super().__init__()
         n_obs = env.n_features
         self._predict = nn.Sequential(
-            nn.Linear(n_obs, self.N_HIDDEN),
+            nn.Linear(2 * n_obs, self.N_HIDDEN),
             nn.ReLU(),
             nn.Linear(self.N_HIDDEN, self.N_HIDDEN))
 
-    def forward(self, obs):
-        return self._predict(obs)
+    def forward(self, init_obs, obs):
+        return self._predict(torch.cat((init_obs, obs), 1))
 
 class Policy(nn.Module):
     # TODO magic
@@ -56,6 +56,14 @@ class Policy(nn.Module):
         for row in probs:
             actions.append(np.random.choice(self._n_actions, p=row))
         return actions
+
+class Segmenter(nn.Module):
+    def __init__(self, env, dataset):
+        super().__init__()
+        self._predict = nn.Linear(StateFeaturizer.N_HIDDEN, 1)
+
+    def forward(self, features):
+        return self._predict(features).squeeze(-1)
 
 class Decoder(nn.Module):
     N_HIDDEN = 256
@@ -112,6 +120,7 @@ class TopDownParser(object):
         self._policy = model._policy
         self._policy_prob = model._policy_prob
         self._describer = model._describer
+        self._segmenter = model._segmenter
 
         self._env = env
         self._dataset = dataset
@@ -119,43 +128,51 @@ class TopDownParser(object):
     def parse(self, seq_batch):
         demos = [task.demonstration() for task in seq_batch.tasks]
 
-        feature_cache = {}
-        for d in range(1): #range(len(demos)):
-            demo = demos[d]
-            for i in range(len(demo)):
-                state_before, _, _ = demo[i]
-                for j in range(i, len(demo)):
-                    state, _, _ = demo[j]
-                    state = state.with_init(state_before)
-                    feature_cache[d, i, j] = state.features()
-
         def score_span(d, i, j, desc):
             # TODO util function
             demo = demos[d]
             hot_desc = np.zeros((len(desc), j-i+1, len(self._dataset.vocab)))
             for p, t in enumerate(desc):
                 hot_desc[p, :, t] = 1
-            features = [feature_cache[d, i, k] for k in range(i, j+1)]
+
+            feats = torch.stack([seq_batch.all_obs[d, k, :] for k in range(i, j+1)])
+            init_feats = (seq_batch.all_obs[d, i, :]
+                    .unsqueeze(0).expand((feats.shape[0], -1)))
             actions = [demo[k][1] for k in range(i, j)] + [self._env.STOP]
 
             # TODO Batch.of_x
             step_batch = data.StepBatch(
-                Variable(torch.FloatTensor(features)),
+                #Variable(torch.FloatTensor(init_feats)),
+                #Variable(torch.FloatTensor(feats)),
+                init_feats,
+                feats,
                 Variable(torch.LongTensor(actions)),
+                None,
                 Variable(torch.FloatTensor(hot_desc)),
                 None, None, None)
-            rep = self._featurizer(step_batch.obs)
+            rep = self._featurizer(step_batch.init_obs, step_batch.obs)
             act_logits, _ = self._policy(rep, step_batch)
             score = self._policy_prob(act_logits, step_batch.act)
             return score
 
         def propose_desc(d, i, j, n):
-            feats = [feature_cache[d, i, j] for _ in range(n)]
-            feats_var = Variable(torch.FloatTensor(feats))
-            reps = self._featurizer(feats_var)
+            # TODO expand
+            init_feats = torch.stack([seq_batch.all_obs[d, i, :] for _ in range(n)])
+            feats = torch.stack([seq_batch.all_obs[d, j, :] for _ in range(n)])
+            reps = self._featurizer(init_feats, feats)
             # TODO magic
             descs = self._describer.decode(reps.unsqueeze(0), 20)
             return descs
+
+        def propose_splits(d, n):
+            # TODO expand
+            init_feats = torch.stack([seq_batch.init_obs[d, :] for _ in range(1, len(demo)-1)])
+            feats = torch.stack([seq_batch.all_obs[d, i, :] for i in range(1, len(demo)-1)])
+            # TODO should this score the second half too?
+            reps = self._featurizer(init_feats, feats)
+            splits = self._segmenter(reps)
+            _, top = splits.topk(min(n, splits.shape[0]), sorted=False)
+            return 1 + top
 
         def render(desc):
             return ' '.join(self._dataset.vocab.get(t) for t in desc)
@@ -166,6 +183,8 @@ class TopDownParser(object):
             descs = []
             scores = []
             splits = list(range(1, len(demo)-1))
+            # TODO magic
+            #splits = propose_splits(d, 10).data.cpu().numpy()
             for k in splits:
                 desc1, = propose_desc(d, 0, k, 1)
                 desc2, = propose_desc(d, k, len(demo)-1, 1)
@@ -178,9 +197,11 @@ class TopDownParser(object):
             i_split = np.asarray(scores).argmin()
             split = splits[i_split]
             d1, d2 = descs[i_split]
+            actions = [t[1] for t in demo]
             print(seq_batch.tasks[d].desc)
+            print(actions[:split], actions[split:])
             print(render(d1), render(d2))
-            break
+            #break
 
 class Model(object):
     def __init__(self, env, dataset, config):
@@ -188,10 +209,12 @@ class Model(object):
         self._policy = Policy(env, dataset)
         self._flat_policy = Policy(env, dataset)
         self._describer = Decoder(dataset.vocab, ling.START, ling.STOP)
+        self._segmenter = Segmenter(env, dataset)
 
         self._policy_obj = nn.CrossEntropyLoss()
         self._policy_prob = nn.CrossEntropyLoss(size_average=False)
         self._describer_obj = nn.CrossEntropyLoss()
+        self._segmenter_obj = nn.BCEWithLogitsLoss()
 
         self._parser = TopDownParser(self, env, dataset)
 
@@ -211,17 +234,19 @@ class Model(object):
     def parse(self, seq_batch):
         return self._parser.parse(seq_batch)
 
-    def train_policy(self, step_batch):
-        rep = self._featurizer(step_batch.obs)
+    def train_step(self, step_batch):
+        rep = self._featurizer(step_batch.init_obs, step_batch.obs)
         act_logits, _ = self._policy(rep, step_batch)
-        loss = self._policy_obj(act_logits, step_batch.act)
+        pol_loss = self._policy_obj(act_logits, step_batch.act)
+        seg_loss = self._segmenter_obj(self._segmenter(rep), step_batch.final)
+        loss = pol_loss + seg_loss
         self._opt.zero_grad()
         loss.backward()
         self._opt.step()
         return Counter({'pol_loss': loss.data.cpu().numpy()[0]})
 
-    def train_helpers(self, seq_batch):
-        rep = self._featurizer(seq_batch.seq_obs)
+    def train_seq(self, seq_batch):
+        rep = self._featurizer(seq_batch.init_obs, seq_batch.last_obs)
         _, desc_logits = self._describer(rep.unsqueeze(0), seq_batch.desc)
         n_tok, n_batch, n_pred = desc_logits.shape
         desc_loss = self._describer_obj(

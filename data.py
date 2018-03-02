@@ -27,7 +27,7 @@ class Batch(namedtuple('Batch', ['tasks', 'actions', 'features'])):
     pass
 
 class SeqBatch(namedtuple('SeqBatch',
-        ['desc', 'desc_target', 'obs', 'seq_obs', 'tasks'])):
+        ['desc', 'desc_target', 'init_obs', 'last_obs', 'all_obs', 'tasks'])):
 
     def cuda(self):
         cu_args = [a.cuda() if a is not None else None for a in self]
@@ -41,23 +41,27 @@ class SeqBatch(namedtuple('SeqBatch',
         n_feats = features[0].shape[1]
 
         desc = []
-        obs = np.zeros((len(tasks), max_demo_len, n_feats))
-        seq_obs = np.zeros((len(tasks), n_feats))
+        init_obs = np.zeros((len(tasks), n_feats))
+        last_obs = np.zeros((len(tasks), n_feats))
+        all_obs = np.zeros((len(tasks), max_demo_len, n_feats))
         for task_id in range(len(tasks)):
             demo_len = features[task_id].shape[0]
             desc.append(tasks[task_id].desc)
-            obs[task_id, :demo_len, :] = features[task_id]
-            seq_obs[task_id, :] = features[task_id][-1]
+            init_obs[task_id, :] = features[task_id][0]
+            last_obs[task_id, :] = features[task_id][-1]
+            all_obs[task_id, :demo_len, :] = features[task_id]
 
         desc_data, desc_target_data = load_desc_data(desc, dataset, target=True)
-        obs_data = torch.FloatTensor(obs)
-        seq_obs_data = torch.FloatTensor(seq_obs)
+        init_obs_data = torch.FloatTensor(init_obs)
+        last_obs_data = torch.FloatTensor(last_obs)
+        all_obs_data = torch.FloatTensor(all_obs)
         return SeqBatch(
-            Variable(desc_data), Variable(desc_target_data), Variable(obs_data),
-            Variable(seq_obs_data), tasks)
+            Variable(desc_data), Variable(desc_target_data),
+            Variable(init_obs_data), Variable(last_obs_data),
+            Variable(all_obs_data), tasks)
 
 class StepBatch(namedtuple('StepBatch',
-        ['obs', 'act', 'desc_in', 'desc_out_mask', 'desc_out', 'desc_out_target'])):
+        ['init_obs', 'obs', 'act', 'final', 'desc_in', 'desc_out_mask', 'desc_out', 'desc_out_target'])):
 
     def cuda(self):
         cu_args = [a.cuda() if a is not None else None for a in self]
@@ -67,22 +71,28 @@ class StepBatch(namedtuple('StepBatch',
     def of(cls, batch, parses, dataset, config):
         tasks, actions, features = batch
 
+        init_obs = []
         obs = []
         act = []
+        final = []
         desc_in = []
         for _ in range(config.N_BATCH_STEPS):
             i_task = np.random.randint(len(tasks))
             i_step = np.random.randint(len(actions[i_task]))
+            init_obs.append(features[i_task][0])
             obs.append(features[i_task][i_step])
             act.append(actions[i_task][i_step])
+            final.append(i_step == len(actions[i_task])-1)
             desc_in.append(tasks[i_task].desc)
 
+        init_obs_data = torch.FloatTensor(init_obs)
         obs_data = torch.FloatTensor(obs)
         act_data = torch.LongTensor(act)
+        final_data = torch.FloatTensor(final)
         desc_in_data = load_desc_data(desc_in, dataset)
         return StepBatch(
-            Variable(obs_data), Variable(act_data), Variable(desc_in_data),
-            None, None, None)
+            Variable(init_obs_data), Variable(obs_data), Variable(act_data),
+            Variable(final_data), Variable(desc_in_data), None, None, None)
 
 class DiskDataset(torch_data.Dataset):
     def __init__(self, cache_dir, n_batch, vocab, env,

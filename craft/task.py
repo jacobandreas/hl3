@@ -23,7 +23,7 @@ class CraftEnv(object):
     CLONE = 8
     STOP = 9
     n_actions = 10
-    n_features = 5 * 5 * 5 * 7 * 3 * 2 + 3 + (1 + len(BlockType.enumerate()))
+    n_features = 5 * 5 * 5 * 7 * 3 + 3 + (1 + len(BlockType.enumerate()))
 
     _action_names = {
         WEST: 'w',
@@ -48,8 +48,8 @@ class CraftEnv(object):
         while True:
             try:
                 task = Task.sample()
-                #if task.desc not in self.ALLOWED:
-                #    continue
+                if task.desc not in self.ALLOWED:
+                    continue
                 break
             except AssertionError as e:
                 pass
