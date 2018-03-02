@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 @profile
-def rollout(task, model, dataset, env, config):
+def rollout(task, model, dataset, env):
     desc = ling.tokenize(task.desc, dataset.vocab)
     desc_data = torch.zeros(len(desc), 1, len(dataset.vocab))
     for i, tok in enumerate(desc):
@@ -17,7 +17,7 @@ def rollout(task, model, dataset, env, config):
 
     state = task.init_state
     steps = []
-    for _ in range(config.N_ROLLOUT_MAX):
+    for _ in range(FLAGS.n_rollout_max):
         obs_data = [state.features()]
         obs_data = torch.FloatTensor(obs_data)
         batch = data.PolicyBatch(
@@ -33,11 +33,11 @@ def rollout(task, model, dataset, env, config):
             break
     return steps
 
-def validate(model, dataset, parse_ex, env, config):
+def validate(model, dataset, parse_ex, env):
     val_loader = torch.utils.data.DataLoader(
-        dataset, batch_size=config.N_BATCH_EXAMPLES, shuffle=True,
+        dataset, batch_size=FLAGS.n_batch_examples, shuffle=True,
         num_workers=2,
-        collate_fn=lambda items: data.collate(items, dataset, config))
+        collate_fn=lambda items: data.collate(items, dataset))
 
     val_stats = Counter()
     val_count = 0
@@ -51,7 +51,7 @@ def validate(model, dataset, parse_ex, env, config):
 
     #with hlog.task('rollout'):
     #    eval_task = env.sample_task()
-    #    steps = rollout(eval_task, model, dataset, env, config)
+    #    steps = rollout(eval_task, model, dataset, env)
     #    actions = [s[1] for s in steps]
     #    last_state = steps[-1][0]
     #    last_scene = last_state.to_scene()
@@ -66,7 +66,7 @@ def validate(model, dataset, parse_ex, env, config):
     #        eval_task.scene_after.dump(scene_f)
 
     with hlog.task('parse'):
-        _, seg_batch = data.collate([parse_ex], dataset, config)
+        _, seg_batch = data.collate([parse_ex], dataset)
         parse = model.parse(seg_batch.cuda())
         hlog.value('result', parse)
         #split = parse[2][0][1]

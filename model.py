@@ -2,11 +2,14 @@ import data
 import ling
 
 from collections import Counter
+import gflags
 import itertools as it
 import numpy as np
 import torch
 from torch import nn, optim
 from torch.autograd import Variable
+
+FLAGS = gflags.FLAGS
 
 class StateFeaturizer(nn.Module):
     N_HIDDEN = 256
@@ -115,7 +118,7 @@ class Decoder(nn.Module):
         return out
 
 class TopDownParser(object):
-    def __init__(self, model, env, dataset, config):
+    def __init__(self, model, env, dataset):
         self._featurizer = model._featurizer
         self._policy = model._policy
         self._policy_prob = model._policy_prob
@@ -198,13 +201,15 @@ class TopDownParser(object):
             split = splits[i_split]
             d1, d2 = descs[i_split]
             actions = [t[1] for t in demo]
-            #print(seq_batch.tasks[d].desc)
-            #print(actions[:split], actions[split:])
-            #print(render(d1), render(d2))
-            #break
+
+            print(seq_batch.tasks[d].desc)
+            print(splits)
+            print(actions[:split], actions[split:])
+            print(render(d1), render(d2))
+            break
 
 class Model(object):
-    def __init__(self, env, dataset, config):
+    def __init__(self, env, dataset):
         self._featurizer = StateFeaturizer(env, dataset)
         self._policy = Policy(env, dataset)
         self._flat_policy = Policy(env, dataset)
@@ -216,14 +221,14 @@ class Model(object):
         self._describer_obj = nn.CrossEntropyLoss()
         self._segmenter_obj = nn.BCEWithLogitsLoss()
 
-        if config.GPU:
+        if FLAGS.gpu:
             for module in [
                     self._featurizer, self._policy, self._flat_policy,
                     self._describer, self._segmenter, self._policy_obj,
                     self._policy_prob, self._describer_obj, self._segmenter_obj]:
                 module.cuda()
 
-        self._parser = TopDownParser(self, env, dataset, config)
+        self._parser = TopDownParser(self, env, dataset)
 
         params = it.chain(
             self._featurizer.parameters(), self._policy.parameters(),

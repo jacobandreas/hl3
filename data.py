@@ -2,6 +2,7 @@ import ling
 from misc import fakeprof, hlog, util
 
 from collections import Counter, namedtuple
+import gflags
 import numpy as np
 import os
 import pickle
@@ -9,6 +10,8 @@ import torch
 import torch.utils.data as torch_data
 from torch.autograd import Variable
 from tqdm import tqdm
+
+FLAGS = gflags.FLAGS
 
 class Batch(namedtuple('Batch', ['tasks', 'actions', 'features'])):
     pass
@@ -21,7 +24,7 @@ class SeqBatch(namedtuple('SeqBatch',
         return SeqBatch(*cu_args)
 
     @classmethod
-    def of(cls, batch, dataset, config):
+    def of(cls, batch, dataset):
         tasks, _, features = batch
 
         max_demo_len = max(f.shape[0] for f in features)
@@ -47,7 +50,7 @@ class SeqBatch(namedtuple('SeqBatch',
             Variable(init_obs_data), Variable(last_obs_data),
             Variable(all_obs_data), tasks)
 
-        if config.GPU:
+        if FLAGS.gpu:
             out = out.cuda()
         return out
 
@@ -59,7 +62,7 @@ class StepBatch(namedtuple('StepBatch',
         return StepBatch(*cu_args)
 
     @classmethod
-    def of(cls, batch, parses, dataset, config):
+    def of(cls, batch, parses, dataset):
         tasks, actions, features = batch
 
         init_obs = []
@@ -67,7 +70,7 @@ class StepBatch(namedtuple('StepBatch',
         act = []
         final = []
         desc_in = []
-        for _ in range(config.N_BATCH_STEPS):
+        for _ in range(FLAGS.n_batch_steps):
             i_task = np.random.randint(len(tasks))
             i_step = np.random.randint(len(actions[i_task]))
             init_obs.append(features[i_task][0])
@@ -85,7 +88,7 @@ class StepBatch(namedtuple('StepBatch',
             Variable(init_obs_data), Variable(obs_data), Variable(act_data),
             Variable(final_data), Variable(desc_in_data), None, None, None)
 
-        if config.GPU:
+        if FLAGS.gpu:
             out = out.cuda()
         return out
 
@@ -132,12 +135,12 @@ class DynamicDataset(torch_data.Dataset):
         features = np.asarray([s.features() for s, a, s_ in demo])
         return task, actions, features
 
-def cache_dataset(env, config):
-    os.mkdir(config.CACHE_DIR)
-    os.mkdir(os.path.join(config.CACHE_DIR, 'features'))
-    os.mkdir(os.path.join(config.CACHE_DIR, 'tasks'))
+def cache_dataset(env):
+    os.mkdir(FLAGS.cache_dir)
+    os.mkdir(os.path.join(FLAGS.cache_dir, 'features'))
+    os.mkdir(os.path.join(FLAGS.cache_dir, 'tasks'))
     actions = []
-    for i_task in tqdm(list(range(config.N_EXAMPLES))):
+    for i_task in tqdm(list(range(FLAGS.n_examples))):
         task = env.sample_task()
         demo = task.demonstration()
         t_actions = []
@@ -148,20 +151,20 @@ def cache_dataset(env, config):
 
         actions.append(t_actions)
 
-        with open(os.path.join(config.CACHE_DIR, 'tasks', 'task%d.pkl' % i_task), 'wb') as task_f:
+        with open(os.path.join(FLAGS.cache_dir, 'tasks', 'task%d.pkl' % i_task), 'wb') as task_f:
             pickle.dump(task, task_f)
 
         np.savez(
-            os.path.join(config.CACHE_DIR, 'features', 'path%d.npz' % i_task),
+            os.path.join(FLAGS.cache_dir, 'features', 'path%d.npz' % i_task),
             np.asarray(features))
 
-    with open(os.path.join(config.CACHE_DIR, 'actions.pkl'), 'wb') as action_f:
+    with open(os.path.join(FLAGS.cache_dir, 'actions.pkl'), 'wb') as action_f:
         pickle.dump(actions, action_f)
 
-def get_dataset(env, config):
+def get_dataset(env):
     vocab = util.Index()
     with hlog.task('setup'):
-        data = [env.sample_task() for _ in range(config.N_SETUP_EXAMPLES)]
+        data = [env.sample_task() for _ in range(FLAGS.n_setup_examples)]
         vocab.index(ling.UNK)
         for datum in data:
             ling.tokenize(datum.desc, vocab, index=True)
@@ -171,17 +174,17 @@ def get_dataset(env, config):
         with hlog.task('vocab_size'):
             hlog.log(len(vocab))
 
-    if config.CACHE_DIR is None:
-        dataset = DynamicDataset(config.N_BATCH_EXAMPLES, vocab, env)
-        val_dataset = DynamicDataset(config.N_BATCH_EXAMPLES, vocab, env)
+    if FLAGS.cache_dir is None:
+        dataset = DynamicDataset(FLAGS.n_batch_examples, vocab, env)
+        val_dataset = DynamicDataset(FLAGS.n_batch_examples, vocab, env)
     else:
-        if not os.path.exists(config.CACHE_DIR):
-            cache_dataset(env, config)
+        if not os.path.exists(FLAGS.cache_dir):
+            cache_dataset(env)
 
         dataset = DiskDataset(
-            config.CACHE_DIR, config.N_BATCH_EXAMPLES, vocab, env)
+            FLAGS.cache_dir, FLAGS.n_batch_examples, vocab, env)
         val_dataset = DiskDataset(
-            config.CACHE_DIR, config.N_BATCH_EXAMPLES, vocab, env,
+            FLAGS.cache_dir, FLAGS.n_batch_examples, vocab, env,
             validation=True)
 
     val_interesting = None
@@ -209,6 +212,6 @@ def load_desc_data(descs, dataset, target=False):
             target_data[i_tok-1, i_desc] = tok
     return desc_data, target_data
 
-def collate(items, dataset, config):
+def collate(items, dataset):
     tasks, actions, features = zip(*items)
     return Batch(tasks, actions, features)
