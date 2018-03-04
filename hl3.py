@@ -52,8 +52,7 @@ def main():
 
                 with hlog.task('e-step', timer=False):
                     seq_batch = data.SeqBatch.of(batch, dataset)
-                    #parses = model.parse(seq_batch)
-                    parses = None
+                    parses = model.parse(seq_batch)
                     step_batch = data.StepBatch.of(batch, parses, dataset)
 
                 with hlog.task('m-step', timer=False):
@@ -63,11 +62,10 @@ def main():
                 i_iter += 1
                 if i_iter % FLAGS.n_log == 0:
                     _log(stats, model)
-                    #model.parse(seq_batch)
                     stats = Counter()
 
-                    seq_batch = data.SeqBatch.of([[p] for p in parse_ex], val_dataset)
-                    model.parse(seq_batch)
+                    #seq_batch = data.SeqBatch.of([[p] for p in parse_ex], val_dataset)
+                    #model.parse(seq_batch)
 
 if __name__ == '__main__':
     gflags.FLAGS(sys.argv)

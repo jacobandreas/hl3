@@ -89,6 +89,7 @@ class Decoder(nn.Module):
         logits = self._predict(rep)
         return enc, logits
 
+    @profile
     def decode(self, init_state, max_len):
         n_stack, n_batch, _ = init_state.shape
         out = [[self._start_id] for _ in range(n_batch)]
@@ -115,6 +116,8 @@ class Decoder(nn.Module):
                 done[i] = done[i] or tok == self._stop_id
             state = new_state
             tok_inp = new_tok_inp
+            if all(done):
+                break
         return out
 
 class TopDownParser(object):
@@ -128,8 +131,23 @@ class TopDownParser(object):
         self._env = env
         self._dataset = dataset
 
+    @profile
     def parse(self, seq_batch):
         demos = [task.demonstration() for task in seq_batch.tasks]
+
+        feature_cache = {}
+        for d, demo in enumerate(demos):
+            init_obs = seq_batch.init_obs[d, :].unsqueeze(0).expand((len(demo), -1))
+            mid_obs = torch.stack([seq_batch.all_obs[d, i, :] for i in range(len(demo))])
+            end_obs = seq_batch.last_obs[d, :].unsqueeze(0).expand((len(demo), -1))
+            reps1 = self._featurizer(init_obs, mid_obs)
+            reps2 = self._featurizer(mid_obs, end_obs)
+            for i in range(1, len(demo)-1):
+                feature_cache[d, 0, i] = reps1[i, :]
+                feature_cache[d, i, len(demo)-1] = reps2[i, :]
+        def get_feats(d, i, j):
+            assert (d, i, j) in feature_cache, (d, i, j)
+            return feature_cache[d, i, j]
 
         def score_span(d, i, j, desc):
             # TODO util function
@@ -160,26 +178,39 @@ class TopDownParser(object):
             return score
 
         def propose_desc(d, i, j, n):
-            # TODO expand
-            init_feats = torch.stack([seq_batch.all_obs[d, i, :] for _ in range(n)])
-            feats = torch.stack([seq_batch.all_obs[d, j, :] for _ in range(n)])
-            reps = self._featurizer(init_feats, feats)
+            reps = get_feats(d, i, j).unsqueeze(0).expand((n, -1))
             # TODO magic
             descs = self._describer.decode(reps.unsqueeze(0), 20)
             return descs
 
         def propose_splits(d, n):
+            demo = demos[d]
             # TODO expand
-            init_feats = torch.stack([seq_batch.init_obs[d, :] for _ in range(1, len(demo)-1)])
-            feats = torch.stack([seq_batch.all_obs[d, i, :] for i in range(1, len(demo)-1)])
-            # TODO should this score the second half too?
-            reps = self._featurizer(init_feats, feats)
-            splits = self._segmenter(reps)
+            first_reps = torch.stack(
+                [get_feats(d, 0, i) for i in range(1, len(demo)-1)])
+            second_reps = torch.stack(
+                [get_feats(d, i, len(demo)-1) for i in range(1, len(demo)-1)])
+            splits = self._segmenter(first_reps)  + self._segmenter(second_reps)
             _, top = splits.topk(min(n, splits.shape[0]), sorted=False)
             return 1 + top
 
         def render(desc):
             return ' '.join(self._dataset.vocab.get(t) for t in desc)
+
+        # 0   1   2   3   4   5   6   7   8   9
+        # s a s a s a s a s a s a s a s a s a s STOP
+        #
+        # (0, 5)
+        # final obs is s5
+        # replace a5 with STOP
+        # 
+        # (5, 9)
+        # final obs is s9
+        # replace a9 with STOP
+
+        out_descs = []
+        out_actions = []
+        out_states = []
 
         for d, demo in enumerate(demos):
             if len(demo) < 3:
@@ -189,6 +220,7 @@ class TopDownParser(object):
             # TODO magic
             splits = propose_splits(d, 5).data.cpu().numpy()
             for k in splits:
+                # TODO batch
                 desc1, = propose_desc(d, 0, k, 1)
                 desc2, = propose_desc(d, k, len(demo)-1, 1)
                 descs.append((desc1, desc2))
@@ -202,11 +234,10 @@ class TopDownParser(object):
             d1, d2 = descs[i_split]
             actions = [t[1] for t in demo]
 
-            print(seq_batch.tasks[d].desc)
-            print(splits)
-            print(actions[:split], actions[split:])
-            print(render(d1), render(d2))
-            break
+            #print(seq_batch.tasks[d].desc)
+            #print(splits)
+            #print(actions[:split], actions[split:])
+            #print(render(d1), render(d2))
 
 class Model(object):
     def __init__(self, env, dataset):
