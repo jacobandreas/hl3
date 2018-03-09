@@ -3,9 +3,12 @@
 from craft.builder import Block, BlockType, Scene, House, Window, Door, Wall, Course
 
 from collections import Counter, namedtuple
+import gflags
 import numpy as np
 from skimage.measure import block_reduce
 from skimage.transform import downscale_local_mean
+
+FLAGS = gflags.FLAGS
 
 def dist(pos1, pos2):
     assert len(pos1) == len(pos2)
@@ -22,7 +25,8 @@ class CraftEnv(object):
     REMOVE = 7
     CLONE = 8
     STOP = 9
-    n_actions = 10
+    SAY = 10
+    n_actions = 11
     n_features = 5 * 5 * 5 * 7 * 3 + 3 + (1 + len(BlockType.enumerate()))
 
     _action_names = {
@@ -48,8 +52,8 @@ class CraftEnv(object):
         while True:
             try:
                 task = Task.sample()
-                #if task.desc not in self.ALLOWED:
-                #    continue
+                if FLAGS.debug and task.desc not in self.ALLOWED:
+                    continue
                 break
             except AssertionError as e:
                 pass

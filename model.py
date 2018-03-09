@@ -49,7 +49,7 @@ class Policy(nn.Module):
         if batch.desc_out is None:
             return act_logits, None
         else:
-            desc_logits = self._decoder(enc, batch.desc_out)
+            desc_logits = self._decoder(enc.unsqueeze(0), batch.desc_out)
             return act_logits, desc_logits
 
     def act(self, features, batch):
@@ -149,17 +149,33 @@ class TopDownParser(object):
             assert (d, i, j) in feature_cache, (d, i, j)
             return feature_cache[d, i, j]
 
-        def score_span(d, i, j, desc):
+        def score_span(d, pi, pdesc, i, j, desc):
             # TODO util function
             demo = demos[d]
-            hot_desc = np.zeros((len(desc), j-i+1, len(self._dataset.vocab)))
+            hot_desc = np.zeros((max(len(desc), len(pdesc)), j-i+1+1, len(self._dataset.vocab)))
+            for p, t in enumerate(pdesc):
+                hot_desc[p, 0, t] = 1
             for p, t in enumerate(desc):
-                hot_desc[p, :, t] = 1
+                hot_desc[p, 1:, t] = 1
 
-            feats = torch.stack([seq_batch.all_obs[d, k, :] for k in range(i, j+1)])
-            init_feats = (seq_batch.all_obs[d, i, :]
-                    .unsqueeze(0).expand((feats.shape[0], -1)))
-            actions = [demo[k][1] for k in range(i, j)] + [self._env.STOP]
+            top_feats = [seq_batch.all_obs[d, i, :]]
+            top_init_feats = [seq_batch.all_obs[d, pi, :]]
+            top_actions = [self._env.SAY]
+            top_desc_out_mask = [1]
+            top_desc = [desc]
+
+            bot_feats = [seq_batch.all_obs[d, k, :] for k in range(i, j+1)]
+            bot_init_feats = [seq_batch.all_obs[d, i, :] for _ in range(i, j+1)]
+            bot_actions = [demo[k][1] for k in range(i, j)] + [self._env.STOP]
+            bot_desc_out_mask = [0 for _ in bot_actions]
+            bot_desc = [[] for _ in bot_actions]
+
+            feats = torch.stack(top_feats + bot_feats)
+            init_feats = torch.stack(top_init_feats + bot_init_feats)
+            actions = top_actions + bot_actions
+            desc_out_mask = top_desc_out_mask + bot_desc_out_mask
+            desc_out, desc_out_target = data.load_desc_data(
+                top_desc + bot_desc, self._dataset, target=True, tokenize=False)
 
             # TODO Batch.of_x
             step_batch = data.StepBatch(
@@ -168,7 +184,9 @@ class TopDownParser(object):
                 Variable(torch.LongTensor(actions)),
                 None,
                 Variable(torch.FloatTensor(hot_desc)),
-                None, None, None)
+                Variable(torch.FloatTensor(desc_out_mask)),
+                Variable(torch.FloatTensor(desc_out)),
+                Variable(torch.LongTensor(desc_out_target)))
             if next(self._policy.parameters()).is_cuda:
                 step_batch = step_batch.cuda()
 
@@ -219,20 +237,34 @@ class TopDownParser(object):
             scores = []
             # TODO magic
             splits = propose_splits(d, 5).data.cpu().numpy()
+            # TODO gross
+            pdesc = ling.tokenize(seq_batch.tasks[d].desc, self._dataset.vocab)
             for k in splits:
                 # TODO batch
                 desc1, = propose_desc(d, 0, k, 1)
                 desc2, = propose_desc(d, k, len(demo)-1, 1)
                 descs.append((desc1, desc2))
                 score = (
-                    score_span(d, 0, k, desc1)
-                    + score_span(d, k, len(demo)-1, desc2))
+                    score_span(d, 0, pdesc, 0, k, desc1)
+                    + score_span(d, 0, pdesc, k, len(demo)-1, desc2))
                 scores.append(score.data.cpu().numpy()[0])
             # TODO argmin on gpu?
             i_split = np.asarray(scores).argmin()
             split = splits[i_split]
             d1, d2 = descs[i_split]
             actions = [t[1] for t in demo]
+
+            # TODO HORRIBLE
+            out_descs.append(render(d1))
+            out_actions.append(actions[0:split] + [self._env.STOP])
+            out_states.append(seq_batch.all_obs[d, 0:split+1, :].data)
+
+            out_descs.append(render(d2))
+            assert actions[len(demo)-1] == self._env.STOP
+            out_actions.append(actions[split:len(demo)-1] + [self._env.STOP])
+            out_states.append(seq_batch.all_obs[d, split:len(demo), :].data)
+
+        return data.ParseBatch(out_descs, out_actions, out_states)
 
             #print(seq_batch.tasks[d].desc)
             #print(splits)

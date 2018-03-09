@@ -23,6 +23,7 @@ gflags.DEFINE_integer('n_epochs', 20, 'number of training epochs')
 gflags.DEFINE_integer('n_log', 100, 'logging frequency')
 gflags.DEFINE_string('cache_dir', '/data/jda/hl3/_cache', 'feature cache directory')
 gflags.DEFINE_boolean('gpu', True, 'use the gpu')
+gflags.DEFINE_boolean('debug', False, 'debug model')
 
 ENV = CraftEnv
 #ENV = NavEnv

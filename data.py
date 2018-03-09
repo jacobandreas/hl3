@@ -16,6 +16,9 @@ FLAGS = gflags.FLAGS
 class Batch(namedtuple('Batch', ['tasks', 'actions', 'features'])):
     pass
 
+class ParseBatch(namedtuple('Batch', ['descs', 'actions', 'features'])):
+    pass
+
 class SeqBatch(namedtuple('SeqBatch',
         ['desc', 'desc_target', 'init_obs', 'last_obs', 'all_obs', 'tasks'])):
 
@@ -62,8 +65,11 @@ class StepBatch(namedtuple('StepBatch',
         return StepBatch(*cu_args)
 
     @classmethod
-    def of(cls, batch, parses, dataset):
-        tasks, actions, features = batch
+    def of(cls, batch, parse_batch, dataset):
+        descs = [task.desc for task in batch.tasks] + parse_batch.descs
+        actions = list(batch.actions) + list(parse_batch.actions)
+        features = list(batch.features) + list(parse_batch.features)
+        n_tasks = len(descs)
 
         init_obs = []
         obs = []
@@ -71,16 +77,16 @@ class StepBatch(namedtuple('StepBatch',
         final = []
         desc_in = []
         for _ in range(FLAGS.n_batch_steps):
-            i_task = np.random.randint(len(tasks))
+            i_task = np.random.randint(n_tasks)
             i_step = np.random.randint(len(actions[i_task]))
-            init_obs.append(features[i_task][0])
-            obs.append(features[i_task][i_step])
+            init_obs.append(torch.FloatTensor(features[i_task][0]))
+            obs.append(torch.FloatTensor(features[i_task][i_step]))
             act.append(actions[i_task][i_step])
             final.append(i_step == len(actions[i_task])-1)
-            desc_in.append(tasks[i_task].desc)
+            desc_in.append(descs[i_task])
 
-        init_obs_data = torch.FloatTensor(init_obs)
-        obs_data = torch.FloatTensor(obs)
+        init_obs_data = torch.stack(init_obs)
+        obs_data = torch.stack(obs)
         act_data = torch.LongTensor(act)
         final_data = torch.FloatTensor(final)
         desc_in_data = load_desc_data(desc_in, dataset)
@@ -117,6 +123,7 @@ class DiskDataset(torch_data.Dataset):
         with open(os.path.join(self.cache_dir, 'tasks', 'task%d.pkl' % i), 'rb') as task_f:
             task = pickle.load(task_f)
         features = np.load(os.path.join(self.cache_dir, 'features', 'path%d.npz' % i))['arr_0']
+
         return task, self.actions[i], features
 
 class DynamicDataset(torch_data.Dataset):
@@ -169,10 +176,8 @@ def get_dataset(env):
         for datum in data:
             ling.tokenize(datum.desc, vocab, index=True)
         dcounts = Counter(datum.desc for datum in data)
-        with hlog.task('setup_data_size'):
-            hlog.log(len(data))
-        with hlog.task('vocab_size'):
-            hlog.log(len(vocab))
+        hlog.value('setup_data_size', len(data))
+        hlog.value('vocab_size', len(vocab))
 
     if FLAGS.cache_dir is None:
         dataset = DynamicDataset(FLAGS.n_batch_examples, vocab, env)
@@ -196,8 +201,11 @@ def get_dataset(env):
 
     return (dataset, val_dataset, val_interesting)
 
-def load_desc_data(descs, dataset, target=False):
-    proc_descs = [ling.tokenize(d, dataset.vocab) for d in descs]
+def load_desc_data(descs, dataset, target=False, tokenize=True):
+    if tokenize:
+        proc_descs = [ling.tokenize(d, dataset.vocab) for d in descs]
+    else:
+        proc_descs = descs
     max_desc_len = max(len(d) for d in proc_descs)
     desc_data = torch.zeros(max_desc_len, len(descs), len(dataset.vocab))
     for i_desc, desc in enumerate(proc_descs):
@@ -209,7 +217,7 @@ def load_desc_data(descs, dataset, target=False):
     for i_desc, desc in enumerate(proc_descs):
         for i_tok, tok in enumerate(desc):
             if i_tok == 0: continue
-            target_data[i_tok-1, i_desc] = tok
+            target_data[i_tok-1, i_desc] = int(tok)
     return desc_data, target_data
 
 def collate(items, dataset):
