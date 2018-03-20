@@ -3,9 +3,13 @@ import ling
 from misc import hlog
 
 from collections import Counter
+import gflags
 from itertools import islice
 import numpy as np
 import torch
+from torch.autograd import Variable
+
+FLAGS = gflags.FLAGS
 
 @profile
 def rollout(task, model, dataset, env):
@@ -13,19 +17,21 @@ def rollout(task, model, dataset, env):
     desc_data = torch.zeros(len(desc), 1, len(dataset.vocab))
     for i, tok in enumerate(desc):
         desc_data[i, 0, tok] = 1
-    desc_var = torch.autograd.Variable(desc_data.cuda())
+    desc = torch.autograd.Variable(desc_data.cuda())
 
     state = task.init_state
+    init_features = Variable(torch.FloatTensor([state.features()]))
     steps = []
     for _ in range(FLAGS.n_rollout_max):
-        obs_data = [state.features()]
-        obs_data = torch.FloatTensor(obs_data)
-        batch = data.PolicyBatch(
-            desc_var,
-            None,
-            torch.autograd.Variable(obs_data.cuda()),
-            None, None)
-        action, = model.act(batch)
+        features = Variable(torch.FloatTensor([state.features()]))
+        batch = data.StepBatch(
+            init_features,
+            features,
+            None, None,
+            desc,
+            None, None, None)
+        batch = batch.cuda() 
+        action, = model.act(batch, sample=False)
         s_ = state.step(action)
         steps.append((state, action, s_))
         state = s_
@@ -33,21 +39,39 @@ def rollout(task, model, dataset, env):
             break
     return steps
 
-def validate(model, dataset, parse_ex, env):
+def validate(model, dataset, env):
     val_loader = torch.utils.data.DataLoader(
         dataset, batch_size=FLAGS.n_batch_examples, shuffle=True,
         num_workers=2,
         collate_fn=lambda items: data.collate(items, dataset))
 
-    val_stats = Counter()
-    val_count = 0
-    for pol_batch, seg_batch in islice(val_loader, 100):
-        pol_batch = pol_batch.cuda()
-        seg_batch = seg_batch.cuda()
-        val_stats += model.evaluate(pol_batch, seg_batch, train=False)
-        val_count += 1
-    for k, v in val_stats.items():
-        hlog.value(k, v / val_count)
+    score = 0.
+    tot = 0.
+    for batch in islice(val_loader, 10):
+        for task in batch.tasks:
+            print(task.desc)
+            print('gold', [a for s, a, s_ in task.demonstration()])
+            steps = rollout(task, model, dataset, env)
+            print('pred', [a for s, a, s_ in steps])
+            last_state = steps[-1][0]
+            score_here = task.validate(last_state)
+            print(score_here)
+            print()
+            score += score_here
+            tot += 1
+    score /= tot
+    hlog.value('score', score)
+    return {'score': score}
+
+    #val_stats = Counter()
+    #val_count = 0
+    #for pol_batch, seg_batch in islice(val_loader, 100):
+    #    pol_batch = pol_batch.cuda()
+    #    seg_batch = seg_batch.cuda()
+    #    val_stats += model.evaluate(pol_batch, seg_batch, train=False)
+    #    val_count += 1
+    #for k, v in val_stats.items():
+    #    hlog.value(k, v / val_count)
 
     #with hlog.task('rollout'):
     #    eval_task = env.sample_task()
@@ -64,13 +88,3 @@ def validate(model, dataset, parse_ex, env):
     #        last_scene.dump(scene_f)
     #    with open('vis/after_gold.json', 'w') as scene_f:
     #        eval_task.scene_after.dump(scene_f)
-
-    with hlog.task('parse'):
-        _, seg_batch = data.collate([parse_ex], dataset)
-        parse = model.parse(seg_batch.cuda())
-        hlog.value('result', parse)
-        #split = parse[2][0][1]
-        #split = parse[0][0][1]
-        #hlog.value('actions', (
-        #    ' '.join(env.action_name(a) for a in parse_ex[1][:split]), 
-        #    ' '.join(env.action_name(a) for a in parse_ex[1][split:])))

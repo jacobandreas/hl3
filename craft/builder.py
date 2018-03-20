@@ -87,6 +87,10 @@ class Tree(namedtuple('Tree', ['pos', 'leaf_type', 'kind', 'tree_blocks'])):
         for block in self.tree_blocks:
             yield block
 
+    def positions(self):
+        for block in self.blocks():
+            yield block.pos
+
     def parts(self):
         yield self
 
@@ -98,7 +102,13 @@ class Tree(namedtuple('Tree', ['pos', 'leaf_type', 'kind', 'tree_blocks'])):
         yield 'a %s tree' % self._kind_names[self.kind]
 
 class Block(namedtuple('Block', ['pos', 'block_type'])):
-    pass
+    def descriptions(self, top=False, mentioned=[]):
+        yield 'a block'
+        for desc in self.block_type.descriptions():
+            yield 'a %s block' % desc
+
+    def positions(self):
+        return {self.pos}
 
 class Window(namedtuple('Window', ['pos', 'parent'])):
     def descriptions(self, top=False, mentioned=[]):
@@ -107,12 +117,19 @@ class Window(namedtuple('Window', ['pos', 'parent'])):
             for desc in self.parent[0].descriptions(mentioned=mentioned+[self]):
                 yield 'a window in %s' % desc
 
+    def positions(self):
+        return {self.pos}
+
 class Door(namedtuple('Door', ['pos', 'parent'])):
     def descriptions(self, top=False, mentioned=[]):
         yield 'a door'
         if top:
             for desc in self.parent[0].descriptions(mentioned=mentioned+[self]):
                 yield 'a door in %s' % desc
+
+    def positions(self):
+        dx, dy, dz = self.pos
+        return {self.pos, (dx, dy+1, dz)}
         
 class Roof(namedtuple('Roof', ['pos', 'roof_blocks'])):
     _block_types = [
@@ -140,6 +157,10 @@ class Roof(namedtuple('Roof', ['pos', 'roof_blocks'])):
         for block in self.roof_blocks:
             yield block
 
+    def positions(self):
+        for block in self.blocks():
+            yield block.pos
+
 class Course(namedtuple('Course', ['pos', 'block_type', 'course_blocks'])):
     def __repr__(self):
         return 'Course(pos=%r, block_type=%r)'
@@ -159,7 +180,7 @@ class Course(namedtuple('Course', ['pos', 'block_type', 'course_blocks'])):
             blocks.append(block)
         return Course(pos, block_type, blocks)
 
-    def descriptions(self, top=False):
+    def descriptions(self, top=False, mentioned=[]):
         yield "a course"
         for desc in self.block_type.descriptions():
             yield "a %s course" % desc
@@ -167,6 +188,10 @@ class Course(namedtuple('Course', ['pos', 'block_type', 'course_blocks'])):
     def blocks(self):
         for block in self.course_blocks:
             yield block
+
+    def positions(self):
+        for block in self.blocks():
+            yield block.pos
 
 class Wall(namedtuple('Wall', ['pos', 'block_type', 'courses', 'window', 'door', 'height', 'incomplete'])):
     NS = 0
@@ -245,13 +270,15 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'courses', 'window', 'door',
     def blocks(self):
         for course in self.courses:
             for block in course.course_blocks:
-                if self.window is not None and block.pos == self.window.pos:
+                if self.window is not None and block.pos in self.window.positions():
                     continue
-                if self.door is not None:
-                    dx, dy, dz = self.door.pos
-                    if block.pos == (dx, dy, dz) or block.pos == (dx, dy+1, dz):
-                        continue
+                if self.door is not None and block.pos in self.door.positions():
+                    continue
                 yield block
+
+    def positions(self):
+        for block in self.blocks():
+            yield block.pos
 
     def parts(self):
         yield self
@@ -368,18 +395,21 @@ class House(namedtuple('House', ['pos', 'walls', 'roof', 'block_type'])):
                 yield 'a house with %s' % desc
 
 class Scene(object):
-    _max_houses = 2
+    #_max_houses = 2
+    #_max_walls = 3
+    #_max_trees = 4
+
+    _max_houses = 0
     _max_walls = 3
     _max_trees = 4
-    #_max_houses = 0
-    #_max_walls = 3
-    #_max_trees = 0
+
     _size = (25, 10, 25)
 
     @classmethod
     def sample(cls):
         n_houses = 0 if cls._max_houses == 0 else np.random.randint(cls._max_houses + 1)
-        n_walls = (0 if n_houses == 1 else 1) + np.random.randint(cls._max_walls)
+        n_walls = 0 if cls._max_walls == 0 else (
+            (0 if n_houses >= 1 else 1) + np.random.randint(cls._max_walls))
         n_trees = 0 if cls._max_trees == 0 else np.random.randint(cls._max_trees)
 
         scene = cls.empty()
@@ -414,6 +444,8 @@ class Scene(object):
             return Scene(self.size, parts, occupied)
 
     def add_walls(self, n_walls):
+        if n_walls == 0:
+            return self
         for _ in range(MAX_TRIES):
             s_width, s_height, s_depth = self.size
             width = 3 + np.random.randint(5)
@@ -485,6 +517,7 @@ class Scene(object):
     def parts(self):
         for part in self._parts:
             if isinstance(part, Block):
+                yield part
                 continue
             for subpart in part.parts():
                 yield subpart

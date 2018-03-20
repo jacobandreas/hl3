@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from craft.builder import Block, BlockType, Scene, House, Window, Door, Wall, Course
+from craft.builder import Block, BlockType, Scene, House, Window, Door, Wall, Course, Tree
 
 from collections import Counter, namedtuple
 import gflags
@@ -156,6 +156,8 @@ class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
             return self.remove()[0]
         elif action == CraftEnv.STOP:
             return None
+        elif action == CraftEnv.SAY:
+            return self
         else:
             assert False, "unknown action %d" % action
 
@@ -205,9 +207,9 @@ class Task(object):
     REMOVE = 2
     CLONE = 3
 
-    #_actions = [FIND, ADD, REMOVE]
     _actions = [FIND, ADD, REMOVE, CLONE]
-    _action_probs = [0.3, 0.3, 0.3, 0.1]
+    #_action_probs = [0.3, 0.3, 0.3, 0.1]
+    _action_probs = [0.8, 0., 0., 0.2]
     _action_names = {
         FIND: 'find',
         ADD: 'add',
@@ -221,7 +223,12 @@ class Task(object):
         parts = list(scene1.parts())
         #part_filter = lambda x: not (isinstance(x, House) or isinstance(x,
         #    Window) or isinstance(x, Door))
-        part_filter = lambda x: not isinstance(x, House)
+        #part_filter = (lambda x: not (
+        #    isinstance(x, House)
+        #    or isinstance(x, Wall)
+        #    or isinstance(x, Tree)))
+        #part_filter = lambda x: not isinstance(x, House)
+        part_filter = lambda x: True
         parts = [p for p in parts if part_filter(p)]
         if len(parts) == 0:
             assert False
@@ -299,13 +306,13 @@ class Task(object):
         return demo
 
     def _demonstrate_find(self, state):
-        return self._go_to(state, self.part.pos)
+        goal_opts = list(self.part.positions())
+        goal = goal_opts[np.random.randint(len(goal_opts))]
+        return self._go_to(state, goal)
 
     def _demonstrate_change(self, state):
         blocks_before = set(self.scene_before.blocks())
         blocks_after = set(self.scene_after.blocks())
-        #to_add = blocks_after - blocks_before
-        #to_remove = blocks_before - blocks_after
         to_add = [b for b in self.scene_after.blocks() if b not in blocks_before]
         to_remove = [b for b in self.scene_before.blocks() if b not in blocks_after]
 
@@ -321,8 +328,6 @@ class Task(object):
         demo = []
 
         build_order = remaining
-        #build_order = list(reversed(sorted(remaining, 
-        #        key=lambda x: (x.block_type.mat_id(), dist(x.pos, state.pos)))))
 
         while len(build_order) > 0:
             nearest = build_order.pop()
@@ -378,3 +383,34 @@ class Task(object):
             demo.append((state, a, s_))
             state = s_
         return demo, state
+
+    def validate(self, state):
+        init_blocks = self.init_state.blocks
+        final_blocks = state.blocks
+
+        blocks_added = np.where(final_blocks > init_blocks)
+        blocks_removed = np.where(init_blocks > final_blocks)
+
+        init_pos = self.init_state.pos
+        final_pos = state.pos
+
+        if self.action == self.FIND:
+            return self._validate_find(final_pos)
+        elif self.action == self.CLONE:
+            return self._validate_clone(state.mat)
+        else:
+            assert False
+
+    def _validate_find(self, final_pos):
+        parts = [part for part in self.scene_before.parts() if final_pos in part.positions()]
+        if len(parts) == 0:
+            return 0.
+        descs = [desc for part in parts for desc in part.descriptions()]
+        if self._part_desc in descs:
+            return 1.
+        return 0.
+
+    def _validate_clone(self, final_mat):
+        if final_mat == self.part.block_type.mat_id():
+            return 1.
+        return 0.

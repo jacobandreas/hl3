@@ -14,10 +14,22 @@ from tqdm import tqdm
 FLAGS = gflags.FLAGS
 
 class Batch(namedtuple('Batch', ['tasks', 'actions', 'features'])):
-    pass
+    def length_filter(self, max_len):
+        tasks = []
+        actions = []
+        features = []
+        for i in range(len(self.tasks)):
+            if len(self.actions[i]) < max_len:
+                tasks.append(self.tasks[i])
+                actions.append(self.actions[i])
+                features.append(self.features[i])
+        kept = len(tasks)
+        return Batch(tasks, actions, features), kept
 
-class ParseBatch(namedtuple('Batch', ['descs', 'actions', 'features'])):
-    pass
+class ParseBatch(namedtuple('ParseBatch', ['descs', 'actions', 'features'])):
+    @classmethod
+    def empty(cls):
+        return ParseBatch([], [], [])
 
 class SeqBatch(namedtuple('SeqBatch',
         ['desc', 'desc_target', 'init_obs', 'last_obs', 'all_obs', 'tasks'])):
@@ -79,8 +91,17 @@ class StepBatch(namedtuple('StepBatch',
         for _ in range(FLAGS.n_batch_steps):
             i_task = np.random.randint(n_tasks)
             i_step = np.random.randint(len(actions[i_task]))
-            init_obs.append(torch.FloatTensor(features[i_task][0]))
-            obs.append(torch.FloatTensor(features[i_task][i_step]))
+            # TODO yuck
+            if isinstance(features[i_task][0], np.ndarray):
+                init_obs.append(torch.FloatTensor(features[i_task][0]))
+                obs.append(torch.FloatTensor(features[i_task][i_step]))
+                # TODO really yuck
+                if FLAGS.gpu:
+                    init_obs[-1] = init_obs[-1].cuda()
+                    obs[-1] = obs[-1].cuda()
+            else:
+                init_obs.append(features[i_task][0])
+                obs.append(features[i_task][i_step])
             act.append(actions[i_task][i_step])
             final.append(i_step == len(actions[i_task])-1)
             desc_in.append(descs[i_task])
@@ -99,7 +120,6 @@ class StepBatch(namedtuple('StepBatch',
         return out
 
 class DiskDataset(torch_data.Dataset):
-    N_VAL = 30
 
     def __init__(self, cache_dir, n_batch, vocab, env,
             validation=False):
@@ -113,13 +133,13 @@ class DiskDataset(torch_data.Dataset):
 
     def __len__(self):
         if self.validation:
-            return self.N_VAL * self.n_batch
+            return FLAGS.n_val_batches * self.n_batch
         else:
-            return len(self.actions) - self.N_VAL * self.n_batch
+            return len(self.actions) - FLAGS.n_val_batches * self.n_batch
 
     def __getitem__(self, i):
         if self.validation:
-            i += len(self.actions) - self.N_VAL * self.n_batch
+            i += len(self.actions) - FLAGS.n_val_batches * self.n_batch
         with open(os.path.join(self.cache_dir, 'tasks', 'task%d.pkl' % i), 'rb') as task_f:
             task = pickle.load(task_f)
         features = np.load(os.path.join(self.cache_dir, 'features', 'path%d.npz' % i))['arr_0']
@@ -138,6 +158,7 @@ class DynamicDataset(torch_data.Dataset):
     def __getitem__(self, i):
         task = self.env.sample_task()
         demo = task.demonstration()
+        task.validate(demo[-1][0])
         actions = [a for s, a, s_ in demo]
         features = np.asarray([s.features() for s, a, s_ in demo])
         return task, actions, features
@@ -197,7 +218,7 @@ def get_dataset(env):
         if val_dataset[i][0].desc == 'add a wood course':
             val_interesting = val_dataset[i]
             #break
-    assert val_interesting is not None
+    #assert val_interesting is not None
 
     return (dataset, val_dataset, val_interesting)
 
