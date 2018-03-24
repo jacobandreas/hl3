@@ -13,20 +13,20 @@ from tqdm import tqdm
 
 FLAGS = gflags.FLAGS
 
-class Batch(namedtuple('Batch', ['tasks', 'actions', 'features'])):
+class Batch(namedtuple('Batch', ['tasks', 'actions', 'obs'])):
     def length_filter(self, max_len):
         tasks = []
         actions = []
-        features = []
+        obs = []
         for i in range(len(self.tasks)):
             if len(self.actions[i]) < max_len:
                 tasks.append(self.tasks[i])
                 actions.append(self.actions[i])
-                features.append(self.features[i])
+                obs.append(self.obs[i])
         kept = len(tasks)
-        return Batch(tasks, actions, features), kept
+        return Batch(tasks, actions, obs), kept
 
-class ParseBatch(namedtuple('ParseBatch', ['descs', 'actions', 'features'])):
+class ParseBatch(namedtuple('ParseBatch', ['descs', 'actions', 'obs'])):
     @classmethod
     def empty(cls):
         return ParseBatch([], [], [])
@@ -40,21 +40,21 @@ class SeqBatch(namedtuple('SeqBatch',
 
     @classmethod
     def of(cls, batch, dataset):
-        tasks, _, features = batch
+        tasks, _, obs = batch
 
-        max_demo_len = max(f.shape[0] for f in features)
-        n_feats = features[0].shape[1]
+        max_demo_len = max(o.shape[0] for o in obs)
+        n_obs = obs[0].shape[1:]
 
         desc = []
-        init_obs = np.zeros((len(tasks), n_feats))
-        last_obs = np.zeros((len(tasks), n_feats))
-        all_obs = np.zeros((len(tasks), max_demo_len, n_feats))
+        init_obs = np.zeros((len(tasks),) + n_obs)
+        last_obs = np.zeros((len(tasks),) + n_obs)
+        all_obs = np.zeros((len(tasks), max_demo_len,) + n_obs)
         for task_id in range(len(tasks)):
-            demo_len = features[task_id].shape[0]
+            demo_len = obs[task_id].shape[0]
             desc.append(tasks[task_id].desc)
-            init_obs[task_id, :] = features[task_id][0]
-            last_obs[task_id, :] = features[task_id][-1]
-            all_obs[task_id, :demo_len, :] = features[task_id]
+            init_obs[task_id, ...] = obs[task_id][0, ...]
+            last_obs[task_id, ...] = obs[task_id][-1, ...]
+            all_obs[task_id, :demo_len, ...] = obs[task_id]
 
         desc_data, desc_target_data = load_desc_data(desc, dataset, target=True)
         init_obs_data = torch.FloatTensor(init_obs)
@@ -70,7 +70,8 @@ class SeqBatch(namedtuple('SeqBatch',
         return out
 
 class StepBatch(namedtuple('StepBatch',
-        ['init_obs', 'obs', 'act', 'final', 'desc_in', 'desc_out_mask', 'desc_out', 'desc_out_target'])):
+        ['init_obs', 'obs', 'act', 'act_pos', 'act_pos_mask', 'final',
+            'desc_in', 'desc_out_mask', 'desc_out', 'desc_out_target'])):
 
     def cuda(self):
         cu_args = [a.cuda() if isinstance(a, Variable) else a for a in self]
@@ -80,39 +81,54 @@ class StepBatch(namedtuple('StepBatch',
     def of(cls, batch, parse_batch, dataset):
         descs = [task.desc for task in batch.tasks] + parse_batch.descs
         actions = list(batch.actions) + list(parse_batch.actions)
-        features = list(batch.features) + list(parse_batch.features)
+        observations = list(batch.obs) + list(parse_batch.obs)
         n_tasks = len(descs)
+
+        env_shape = observations[0][0].shape[1:]
 
         init_obs = []
         obs = []
         act = []
+        act_pos = []
+        act_pos_mask = []
         final = []
         desc_in = []
         for _ in range(FLAGS.n_batch_steps):
             i_task = np.random.randint(n_tasks)
             i_step = np.random.randint(len(actions[i_task]))
             # TODO yuck
-            if isinstance(features[i_task][0], np.ndarray):
-                init_obs.append(torch.FloatTensor(features[i_task][0]))
-                obs.append(torch.FloatTensor(features[i_task][i_step]))
+            if isinstance(observations[i_task][0], np.ndarray):
+                init_obs.append(torch.FloatTensor(observations[i_task][0]))
+                obs.append(torch.FloatTensor(observations[i_task][i_step]))
                 # TODO really yuck
                 if FLAGS.gpu:
                     init_obs[-1] = init_obs[-1].cuda()
                     obs[-1] = obs[-1].cuda()
             else:
-                init_obs.append(features[i_task][0])
-                obs.append(features[i_task][i_step])
-            act.append(actions[i_task][i_step])
+                init_obs.append(observations[i_task][0])
+                obs.append(observations[i_task][i_step])
+            action, action_pos = actions[i_task][i_step]
+            act.append(action)
+            if action_pos is None:
+                act_pos.append(0)
+                act_pos_mask.append(0)
+            else:
+                raveled = int(np.ravel_multi_index(action_pos, env_shape))
+                act_pos.append(raveled)
+                act_pos_mask.append(1)
             final.append(i_step == len(actions[i_task])-1)
             desc_in.append(descs[i_task])
 
         init_obs_data = torch.stack(init_obs)
         obs_data = torch.stack(obs)
         act_data = torch.LongTensor(act)
+        act_pos_data = torch.LongTensor(act_pos)
+        act_pos_mask_data = torch.FloatTensor(act_pos_mask)
         final_data = torch.FloatTensor(final)
         desc_in_data = load_desc_data(desc_in, dataset)
         out = StepBatch(
             Variable(init_obs_data), Variable(obs_data), Variable(act_data),
+            Variable(act_pos_data), Variable(act_pos_mask_data),
             Variable(final_data), Variable(desc_in_data), None, None, None)
 
         if FLAGS.gpu:
@@ -120,7 +136,6 @@ class StepBatch(namedtuple('StepBatch',
         return out
 
 class DiskDataset(torch_data.Dataset):
-
     def __init__(self, cache_dir, n_batch, vocab, env,
             validation=False):
         self.cache_dir = cache_dir
@@ -142,9 +157,9 @@ class DiskDataset(torch_data.Dataset):
             i += len(self.actions) - FLAGS.n_val_batches * self.n_batch
         with open(os.path.join(self.cache_dir, 'tasks', 'task%d.pkl' % i), 'rb') as task_f:
             task = pickle.load(task_f)
-        features = np.load(os.path.join(self.cache_dir, 'features', 'path%d.npz' % i))['arr_0']
+        obs = np.load(os.path.join(self.cache_dir, 'obs', 'path%d.npz' % i))['arr_0']
 
-        return task, self.actions[i], features
+        return task, self.actions[i], obs
 
 class DynamicDataset(torch_data.Dataset):
     def __init__(self, n_batch, vocab, env):
@@ -160,22 +175,22 @@ class DynamicDataset(torch_data.Dataset):
         demo = task.demonstration()
         task.validate(demo[-1][0])
         actions = [a for s, a, s_ in demo]
-        features = np.asarray([s.features() for s, a, s_ in demo])
-        return task, actions, features
+        obs = np.asarray([s.obs() for s, a, s_ in demo])
+        return task, actions, obs
 
 def cache_dataset(env):
     os.mkdir(FLAGS.cache_dir)
-    os.mkdir(os.path.join(FLAGS.cache_dir, 'features'))
+    os.mkdir(os.path.join(FLAGS.cache_dir, 'obs'))
     os.mkdir(os.path.join(FLAGS.cache_dir, 'tasks'))
     actions = []
     for i_task in tqdm(list(range(FLAGS.n_examples))):
         task = env.sample_task()
         demo = task.demonstration()
         t_actions = []
-        features = []
+        obs = []
         for s, a, s_ in demo:
             t_actions.append(a)
-            features.append(s.features())
+            obs.append(s.obs())
 
         actions.append(t_actions)
 
@@ -183,8 +198,8 @@ def cache_dataset(env):
             pickle.dump(task, task_f)
 
         np.savez(
-            os.path.join(FLAGS.cache_dir, 'features', 'path%d.npz' % i_task),
-            np.asarray(features))
+            os.path.join(FLAGS.cache_dir, 'obs', 'path%d.npz' % i_task),
+            np.asarray(obs))
 
     with open(os.path.join(FLAGS.cache_dir, 'actions.pkl'), 'wb') as action_f:
         pickle.dump(actions, action_f)
@@ -242,5 +257,5 @@ def load_desc_data(descs, dataset, target=False, tokenize=True):
     return desc_data, target_data
 
 def collate(items, dataset):
-    tasks, actions, features = zip(*items)
-    return Batch(tasks, actions, features)
+    tasks, actions, obs = zip(*items)
+    return Batch(tasks, actions, obs)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from craft.builder import Block, BlockType, Scene, House, Window, Door, Wall, Course, Tree
+from craft.builder import BuilderException
 
 from collections import Counter, namedtuple
 import gflags
@@ -15,27 +16,20 @@ def dist(pos1, pos2):
     return sum(abs(q1 - q2) for q1, q2 in zip(pos1, pos2))
 
 class CraftEnv(object):
-    WEST = 0
-    EAST = 1
-    DOWN = 2
-    UP = 3
-    SOUTH = 4
-    NORTH = 5
-    ADD = 6
-    REMOVE = 7
-    CLONE = 8
-    STOP = 9
-    SAY = 10
-    n_actions = 11
-    n_features = 5 * 5 * 5 * 7 * 3 + 3 + (1 + len(BlockType.enumerate()))
+    GO = 0
+    ADD = 1
+    REMOVE = 2
+    CLONE = 3
+    STOP = 4
+    SAY = 5
+    n_actions = 6
+    
+    env_shape = Scene._size
+    n_block_types = 1 + len(BlockType.enumerate())
+    n_world_obs = n_block_types + n_block_types
 
     _action_names = {
-        WEST: 'w',
-        EAST: 'e',
-        DOWN: 'd',
-        UP: 'u',
-        SOUTH: 's',
-        NORTH: 'n',
+            GO: 'g',
         ADD: 'A',
         REMOVE: 'R',
         CLONE: 'C',
@@ -55,7 +49,8 @@ class CraftEnv(object):
                 if FLAGS.debug and task.desc not in self.ALLOWED:
                     continue
                 break
-            except AssertionError as e:
+            except BuilderException as e:
+                print(e)
                 pass
         return task
 
@@ -66,16 +61,14 @@ class CraftEnv(object):
 class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
     @classmethod
     def from_scene(cls, scene, pos, mat):
-        blocks = np.zeros(scene.size + (len(BlockType.enumerate()) + 1,))
+        blocks = np.zeros((CraftEnv.n_block_types,) + CraftEnv.env_shape)
         for block in scene.blocks():
-            blocks[block.pos + (block.block_type.mat_id(),)] = 1
-        #if mat is None:
-        #    mat = len(BlockType.enumerate()) + 1
+            blocks[(block.block_type.mat_id(),) + block.pos] = 1
         return CraftState(blocks, pos, mat)
 
     def to_scene(self):
-        size = self.blocks.shape[:3]
-        occupied = (self.blocks.argmax(axis=3) > 0).astype(int)
+        size = self.blocks.shape[1:]
+        occupied = (self.blocks.argmax(axis=0) > 0).astype(int)
 
         parts = []
         for x in range(size[0]):
@@ -85,69 +78,42 @@ class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
                         continue
                     parts.append(Block(
                         (x, y, z),
-                        BlockType.with_id(self.blocks[x, y, z, :].argmax())))
+                        BlockType.with_id(self.blocks[:, x, y, z].argmax())))
 
         return Scene(size, parts, occupied)
 
-
-    def move(self, delta, act):
-        npos = tuple(p + d for p, d in zip(self.pos, delta))
-        ok = all(n >= 0 for n in npos) and all(n < s for n, s in zip(npos, self.blocks.shape))
-        if not ok:
-            return self, act
-        return self._replace(pos=npos), act
-
-    def west(self):
-        return self.move((-1, 0, 0), CraftEnv.WEST)
-
-    def east(self):
-        return self.move((1, 0, 0), CraftEnv.EAST)
-
-    def down(self):
-        return self.move((0, -1, 0), CraftEnv.DOWN)
-
-    def up(self):
-        return self.move((0, 1, 0), CraftEnv.UP)
-
-    def south(self):
-        return self.move((0, 0, -1), CraftEnv.SOUTH)
-
-    def north(self):
-        return self.move((0, 0, 1), CraftEnv.NORTH)
+    def go(self, pos):
+        assert (len(pos) == 3 
+            and all(0 <= p < l for p, l in zip(pos, self.blocks.shape[1:])))
+        return self._replace(pos=pos), (CraftEnv.GO, pos)
 
     def clone(self):
-        if not self.blocks[self.pos].any():
+        x, y, z = self.pos
+        if not self.blocks[:, x, y, z].any():
             return self, CraftEnv.CLONE
-        return self._replace(mat=self.blocks[self.pos].argmax()), CraftEnv.CLONE
+        return self._replace(mat=self.blocks[:, x, y, z].argmax()), (CraftEnv.CLONE, None)
 
     def add(self):
-        if self.blocks[self.pos].any():
+        x, y, z = self.pos
+        if self.blocks[:, x, y, z].any():
             return self, CraftEnv.ADD
         blocks = self.blocks.copy()
-        blocks[self.pos + (self.mat,)] = 1
-        return self._replace(blocks=blocks), CraftEnv.ADD
+        blocks[self.mat, x, y, z] = 1
+        return self._replace(blocks=blocks), (CraftEnv.ADD, None)
 
     def remove(self):
-        if not self.blocks[self.pos].any():
+        x, y, z = self.pos
+        if not self.blocks[:, x, y, z].any():
             return self, CraftEnv.REMOVE
         blocks = self.blocks.copy()
-        blocks[self.pos] = 0
-        return self._replace(blocks=blocks), CraftEnv.REMOVE
+        blocks[:, x, y, z] = 0
+        return self._replace(blocks=blocks), (CraftEnv.REMOVE, None)
 
     # TODO REFACTOR!!!
-    def step(self, action):
-        if action == CraftEnv.WEST:
-            return self.west()[0]
-        elif action == CraftEnv.EAST:
-            return self.east()[0]
-        elif action == CraftEnv.DOWN:
-            return self.down()[0]
-        elif action == CraftEnv.UP:
-            return self.up()[0]
-        elif action == CraftEnv.SOUTH:
-            return self.south()[0]
-        elif action == CraftEnv.NORTH:
-            return self.north()[0]
+    def step(self, full_action):
+        action, pos = full_action
+        if action == CraftEnv.GO:
+            return self.go(pos)[0]
         elif action == CraftEnv.CLONE:
             return self.clone()[0]
         elif action == CraftEnv.ADD:
@@ -161,45 +127,12 @@ class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
         else:
             assert False, "unknown action %d" % action
 
-    def _block_features(self, blocks):
-        from math import ceil, floor
-
-        def pad_slice(w, h, d, f, x, y, z, data):
-            assert data.shape == (w, h, d, f)
-            e = np.zeros((w+4, h+4, d+4, f))
-            e[2:-2, 2:-2, 2:-2, :] = data
-            ft = e[x-2+2:x+3+2, y-2+2:y+3+2, z-2+2:z+3+2, :]
-            assert ft.shape[:3] == (5, 5, 5), \
-                "bad slice with %d %d %d / %d %d %d" % (w, h, d, x, y, z)
-            return ft
-
+    def obs(self):
+        pos_features = np.zeros((CraftEnv.n_block_types,) + CraftEnv.env_shape)
         x, y, z = self.pos
-
-        p0 = blocks
-        w, h, d, f = p0.shape
-        f0 = pad_slice(w, h, d, f, x, y, z, p0)
-
-        w1, h1, d1 = ceil(w/3), ceil(h/3), ceil(d/3)
-        x1, y1, z1 = floor(x/3), floor(y/3), floor(z/3)
-        #p1 = block_reduce(p0, (3, 3, 3, 1), func=np.mean)
-        p1 = downscale_local_mean(p0, (3, 3, 3, 1))
-        f1 = pad_slice(w1, h1, d1, f, x1, y1, z1, p1)
-
-        w2, h2, d2 = ceil(w1/3), ceil(h1/3), ceil(d1/3)
-        x2, y2, z2 = floor(x1/3), floor(y1/3), floor(z1/3)
-        #p2 = block_reduce(p1, (3, 3, 3, 1), func=np.mean)
-        p2 = downscale_local_mean(p1, (3, 3, 3, 1))
-        f2 = pad_slice(w2, h2, d2, f, x2, y2, z2, p2)
-
-        return np.concatenate((f0.ravel(), f1.ravel(), f2.ravel()))
-
-    def features(self):
-        mat_features = np.zeros((1 + len(BlockType.enumerate()),))
-        mat_features[self.mat] = 1
-        return np.concatenate((
-            self._block_features(self.blocks),
-            mat_features,
-            np.asarray(self.pos) / np.asarray(self.blocks.shape[:3])))
+        pos_features[self.mat, x, y, z] = 1
+        out = np.concatenate((self.blocks, pos_features), axis=0)
+        return out
 
 class Task(object):
     FIND = 0
@@ -208,8 +141,8 @@ class Task(object):
     CLONE = 3
 
     _actions = [FIND, ADD, REMOVE, CLONE]
-    #_action_probs = [0.3, 0.3, 0.3, 0.1]
-    _action_probs = [0.8, 0., 0., 0.2]
+    _action_probs = [0.3, 0.3, 0.3, 0.1]
+    #_action_probs = [0.8, 0., 0., 0.2]
     _action_names = {
         FIND: 'find',
         ADD: 'add',
@@ -220,21 +153,26 @@ class Task(object):
     @classmethod
     def sample(cls):
         scene1 = Scene.sample()
+        action = np.random.choice(cls._actions, p=cls._action_probs)
+
         parts = list(scene1.parts())
-        #part_filter = lambda x: not (isinstance(x, House) or isinstance(x,
-        #    Window) or isinstance(x, Door))
-        #part_filter = (lambda x: not (
-        #    isinstance(x, House)
-        #    or isinstance(x, Wall)
-        #    or isinstance(x, Tree)))
-        #part_filter = lambda x: not isinstance(x, House)
-        part_filter = lambda x: True
+        def part_filter(part):
+            if action == cls.ADD and isinstance(part, Block):
+                return False
+            if action == cls.ADD or action == cls.REMOVE:
+                return (
+                    not isinstance(part, House) 
+                    and not isinstance(part, Tree))
+            if action == cls.CLONE:
+                return (
+                    not isinstance(part, Window) 
+                    and not isinstance(part, Door))
+            return True
         parts = [p for p in parts if part_filter(p)]
         if len(parts) == 0:
             assert False
         part = parts[np.random.randint(len(parts))]
         scene2 = scene1.remove(part)
-        action = np.random.choice(cls._actions, p=cls._action_probs)
 
         descs = list(part.descriptions(top=True))
         here = action in (cls.ADD, cls.REMOVE) and np.random.random() < 0.25
@@ -246,7 +184,6 @@ class Task(object):
 
         if action == cls.FIND:
             scene_before = scene_after = scene1
-            assert not here
         elif action == cls.REMOVE:
             scene_before = scene1
             scene_after = scene2
@@ -255,8 +192,6 @@ class Task(object):
             scene_after = scene1
         elif action == cls.CLONE:
             scene_before = scene_after = scene1
-            assert hasattr(part, 'blocks')
-            assert not here
             blocks = list(part.blocks())
             part = blocks[np.random.randint(len(blocks))]
             desc = 'a ' + next(part.block_type.descriptions()) + ' block'
@@ -302,7 +237,8 @@ class Task(object):
             demo, state = self._get_mat(self.init_state, self.part.block_type)
         else:
             demo, state = self._demonstrate_change(self.init_state)
-        demo.append((state, CraftEnv.STOP, None))
+        demo.append((state, (CraftEnv.STOP, None), None))
+        assert self.validate(demo[-1][0], debug=False) > 0
         return demo
 
     def _demonstrate_find(self, state):
@@ -346,8 +282,8 @@ class Task(object):
                 state_without = s_
 
             nx, ny, nz = nearest.pos
-            assert state_with.blocks[nx, ny, nz, :].sum() > 0
-            assert state_without.blocks[nx, ny, nz, :].sum() == 0
+            assert state_with.blocks[:, nx, ny, nz].sum() > 0
+            assert state_without.blocks[:, nx, ny, nz].sum() == 0
 
             demo.append((state, a, s_))
             state = s_
@@ -364,53 +300,180 @@ class Task(object):
         return demo, state
 
     def _go_to(self, state, dest):
-        demo = []
-        while state.pos != dest:
-            if dest[0] < state.pos[0]:
-                s_, a = state.west()
-            elif dest[0] > state.pos[0]:
-                s_, a = state.east()
-            elif dest[1] < state.pos[1]:
-                s_, a = state.down()
-            elif dest[1] > state.pos[1]:
-                s_, a = state.up()
-            elif dest[2] < state.pos[2]:
-                s_, a = state.south()
-            elif dest[2] > state.pos[2]:
-                s_, a = state.north()
-            else:
-                assert False
-            demo.append((state, a, s_))
+        if state.pos == dest:
+            demo = []
+        else:
+            s_, a = state.go(dest)
+            demo = [(state, a, s_)]
             state = s_
         return demo, state
 
-    def validate(self, state):
-        init_blocks = self.init_state.blocks
-        final_blocks = state.blocks
-
-        blocks_added = np.where(final_blocks > init_blocks)
-        blocks_removed = np.where(init_blocks > final_blocks)
-
+    def validate(self, state, debug=True):
         init_pos = self.init_state.pos
         final_pos = state.pos
 
-        if self.action == self.FIND:
-            return self._validate_find(final_pos)
-        elif self.action == self.CLONE:
-            return self._validate_clone(state.mat)
-        else:
-            assert False
+        if debug:
+            px, _, pz = final_pos
+            px1, pz1 = max(px-2, 0), max(pz-2, 0)
+            px2, pz2 = px+2, pz+2
+            sl = state.blocks[:, px1:px2+1, :, pz1:pz2+1].sum(axis=(0, 2))
 
-    def _validate_find(self, final_pos):
+            goal_pos = self.demonstration()[-1][0].pos
+            gx, _, gz = goal_pos
+            gx1, gz1 = max(gx-2, 0), max(gz-2, 0)
+            gx2, gz2 = gx+2, gz+2
+            gl = state.blocks[:, gx1:gx2+1, :, gz1:gz2+1].sum(axis=(0, 2))
+            print("sl")
+            print(sl)
+            #print("gl")
+            #print(gl)
+            #print("everything")
+            #print(state.blocks.sum(axis=(0, 2)))
+
+        if self.action == self.FIND:
+            return self._validate_find(final_pos, debug=debug)
+        elif self.action == self.CLONE:
+            return self._validate_clone(state.mat, debug=debug)
+        elif self.action == self.ADD:
+            return self._validate_add(state)
+        elif self.action == self.REMOVE:
+            return self._validate_remove(state)
+        else:
+            return 1
+
+    def _validate_find(self, final_pos, debug=True):
         parts = [part for part in self.scene_before.parts() if final_pos in part.positions()]
         if len(parts) == 0:
             return 0.
-        descs = [desc for part in parts for desc in part.descriptions()]
+        descs = [desc for part in parts for desc in part.descriptions(top=True)]
+        if(debug):
+            print(descs)
         if self._part_desc in descs:
             return 1.
         return 0.
 
-    def _validate_clone(self, final_mat):
+    def _validate_clone(self, final_mat, debug=True):
+        if debug:
+            print(BlockType.with_id(final_mat).material)
         if final_mat == self.part.block_type.mat_id():
             return 1.
         return 0.
+
+    def _get_delta(self, state):
+        parts = [
+            p for p in self.scene_before.parts()
+            if isinstance(p, type(self.part))]
+        parts = [
+            p for p in parts
+            if self._part_desc in p.descriptions(top=True)]
+
+        init_blocks = self.init_state.blocks.sum(axis=0)
+        final_blocks = state.blocks.sum(axis=0)
+
+        added = np.where(final_blocks > init_blocks)
+        removed = np.where(init_blocks > final_blocks)
+
+        a_x, a_y, a_z = added
+        a_x, a_y, a_z = set(a_x), set(a_y), set(a_z)
+        added_distinct = sorted([len(a_x), len(a_y), len(a_z)])
+        r_x, r_y, r_z = removed
+        r_x, r_y, r_z = set(r_x), set(r_y), set(r_z)
+        removed_distinct = sorted([len(r_x), len(r_y), len(r_z)])
+
+        return added_distinct, removed_distinct, parts
+
+    # TODO SO MUCH REFACTORING
+    def _validate_add(self, state):
+        added_distinct, removed_distinct, _ = self._get_delta(state)
+        added_any = added_distinct != [0, 0, 0]
+        removed_any = removed_distinct != [0, 0, 0]
+
+        # TODO actually located in wall
+        if isinstance(self.part, Window):
+            if added_distinct != [0, 0, 0]:
+                return 0.
+            if removed_distinct != [1, 1, 1]:
+                return 0.
+            return 1.
+
+        # TODO actually located in wall
+        # TODO direction
+        elif isinstance(self.part, Door):
+            if added_distinct != [0, 0, 0]:
+                return 0.
+            if removed_distinct != [1, 1, 2]:
+                return 0.
+            return 1.
+
+        # TODO validate block type
+        # TODO direction
+        elif isinstance(self.part, Course):
+            if removed_distinct != [0, 0, 0]:
+                return 0.
+            if added_distinct[:2] != [1, 1]:
+                return 0.
+            if added_distinct[2] < 2:
+                return 0.
+            return 1.
+
+        return 0.5
+
+    def _validate_remove(self, state):
+        added_distinct, removed_distinct, candidates = self._get_delta(state)
+        added_any = added_distinct != [0, 0, 0]
+        removed_any = removed_distinct != [0, 0, 0]
+
+        if isinstance(self.part, Block):
+            if added_any:
+                return 0.
+            if removed_distinct != [1, 1, 1]:
+                return 0.
+            removed = [
+                not state.blocks[:, p.pos[0], p.pos[1], p.pos[2]].any()
+                for p in candidates]
+            if not any(removed):
+                return 0.
+            return 1.
+
+        if isinstance(self.part, Window):
+            if removed_any:
+                return 0.
+            if added_distinct != [1, 1, 1]:
+                return 0.
+            filled = []
+            for p in candidates:
+                # TODO global property of wall
+                mat = next(p.parent[0].blocks()).block_type.mat_id()
+                x, y, z = p.pos
+                filled.append(state.blocks[mat, x, y, z] == 1)
+            if not any(filled):
+                return 0.
+            return 1.
+
+        # TODO validate block type
+        # TODO validate actually located in wall
+        elif isinstance(self.part, Door):
+            if removed_any:
+                return 0.
+            if added_distinct != [1, 1, 2]:
+                return 0.
+            filled = []
+            for p in candidates:
+                # TODO global property of wall
+                mat = next(p.parent[0].blocks()).block_type.mat_id()
+                filled.append(all(
+                    state.blocks[mat, x, y, z] == 1 for x, y, z in p.positions()))
+            if not any(filled):
+                return 0.
+            return 1.
+
+        elif isinstance(self.part, Course):
+            if added_any:
+                return 0.
+            if removed_distinct[:2] != [1, 1]:
+                return 0.
+            if removed_distinct[2] < 2:
+                return 0.
+            return 1.
+
+        return 0.5

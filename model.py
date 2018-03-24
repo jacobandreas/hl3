@@ -14,19 +14,49 @@ FLAGS = gflags.FLAGS
 def unwrap(var):
     return var.data.cpu().numpy()
 
-class StateFeaturizer(nn.Module):
-    N_HIDDEN = 256
+#class StateFeaturizer(nn.Module):
+#    N_HIDDEN = 256
+#
+#    def __init__(self, env, dataset):
+#        super().__init__()
+#        n_obs = env.n_features
+#        self._predict = nn.Sequential(
+#            nn.Linear(2 * n_obs, self.N_HIDDEN),
+#            nn.ReLU(),
+#            nn.Linear(self.N_HIDDEN, self.N_HIDDEN),
+#            nn.ReLU(),
+#            nn.Linear(self.N_HIDDEN, self.N_HIDDEN),
+#            )
+#
+#    def forward(self, init_obs, obs):
+#        return self._predict(torch.cat((obs, obs - init_obs), 1))
+
+class WorldFeaturizer(nn.Module):
+    N_HIDDEN_1 = 128
+    N_HIDDEN_2 = 256
+    N_HIDDEN = N_HIDDEN_2
+    KERNEL_1 = 5
+    KERNEL_2 = 1
+    PAD_1 = 2
+    PAD_2 = 0
 
     def __init__(self, env, dataset):
         super().__init__()
-        n_obs = env.n_features
-        self._predict = nn.Sequential(
-            nn.Linear(2 * n_obs, self.N_HIDDEN),
+        self._conv = nn.Sequential(
+            nn.Conv3d(
+                2*env.n_world_obs, self.N_HIDDEN_1, self.KERNEL_1,
+                padding=self.PAD_1),
             nn.ReLU(),
-            nn.Linear(self.N_HIDDEN, self.N_HIDDEN))
+            nn.Conv3d(
+                self.N_HIDDEN_1, self.N_HIDDEN_2, self.KERNEL_2,
+                padding=self.PAD_2))
 
     def forward(self, init_obs, obs):
-        return self._predict(torch.cat((obs, obs - init_obs), 1))
+        in_obs = torch.cat((obs, obs-init_obs), 1)
+        conv_feats = self._conv(in_obs)
+        n_batch = obs.shape[0]
+        pool_feats, _ = conv_feats.view(n_batch, self.N_HIDDEN_2, -1).max(2)
+        return pool_feats, conv_feats
 
 class Policy(nn.Module):
     # TODO magic
@@ -39,26 +69,34 @@ class Policy(nn.Module):
         self._embed = nn.Linear(len(dataset.vocab), self.N_WORDVEC)
         self._encoder = nn.GRU(
             input_size=self.N_WORDVEC, hidden_size=self.N_HIDDEN, num_layers=1)
-        self._decoder = Decoder(dataset.vocab, ling.START, ling.STOP)
-        self._predict = nn.Bilinear(self.N_HIDDEN, StateFeaturizer.N_HIDDEN,
+        #self._decoder = Decoder(dataset.vocab, ling.START, ling.STOP)
+        # TODO overkill?
+        self._predict_act = nn.Bilinear(self.N_HIDDEN, WorldFeaturizer.N_HIDDEN,
             self._n_actions)
-        self._softmax = nn.Softmax(dim=1)
+        #self._predict = nn.Bilinear(self.N_HIDDEN, StateFeaturizer.N_HIDDEN,
+        #    self._n_actions)
+        self._act_softmax = nn.Softmax(dim=1)
+        self._act_pos_softmax = nn.Softmax(dim=1)
 
-    def forward(self, features, batch):
+    def forward(self, feats, conv_feats, batch):
         emb = self._embed(batch.desc_in)
         _, enc = self._encoder(emb)
         enc = enc.squeeze(0)
-        act_logits = self._predict(enc, features)
+        act_logits = self._predict_act(enc, feats)
+
+        n_batch, n_feats, _, _, _ = conv_feats.shape
+        tile_enc = enc.view(n_batch, n_feats, 1, 1, 1).expand_as(conv_feats)
+        act_pos_logits = (conv_feats * tile_enc).sum(1).view(n_batch, -1)
         if batch.desc_out is None:
-            return act_logits, None
+            return act_logits, act_pos_logits, None
         else:
             desc_logits = self._decoder(enc.unsqueeze(0), batch.desc_out)
-            return act_logits, desc_logits
+            return act_logits, act_pos_logits, desc_logits
 
 class Segmenter(nn.Module):
     def __init__(self, env, dataset):
         super().__init__()
-        self._predict = nn.Linear(StateFeaturizer.N_HIDDEN, 1)
+        self._predict = nn.Linear(WorldFeaturizer.N_HIDDEN, 1)
 
     def forward(self, features):
         return self._predict(features).squeeze(-1)
@@ -118,7 +156,7 @@ class TopDownParser(object):
     def __init__(self, model, env, dataset):
         self._featurizer = model._featurizer
         self._policy = model._policy
-        self._policy_prob = model._policy_prob
+        self._policy_prob = model._policy_act_prob
         self._desc_prob = model._desc_prob
         self._describer = model._describer
         self._segmenter = model._segmenter
@@ -135,8 +173,8 @@ class TopDownParser(object):
             init_obs = seq_batch.init_obs[d, :].unsqueeze(0).expand((len(demo), -1))
             mid_obs = torch.stack([seq_batch.all_obs[d, i, :] for i in range(len(demo))])
             end_obs = seq_batch.last_obs[d, :].unsqueeze(0).expand((len(demo), -1))
-            reps1 = self._featurizer(init_obs, mid_obs)
-            reps2 = self._featurizer(mid_obs, end_obs)
+            reps1, _ = self._featurizer(init_obs, mid_obs)
+            reps2, _ = self._featurizer(mid_obs, end_obs)
             for i in range(1, len(demo)-1):
                 feature_cache[d, 0, i] = reps1[i, :]
                 feature_cache[d, i, len(demo)-1] = reps2[i, :]
@@ -155,8 +193,8 @@ class TopDownParser(object):
             for p, t in enumerate(desc):
                 hot_desc[p, 1:, t] = 1
 
-            top_feats = [seq_batch.all_obs[d, i, :]]
-            top_init_feats = [seq_batch.all_obs[d, pi, :]]
+            top_obs = [seq_batch.all_obs[d, i, :]]
+            top_init_obs = [seq_batch.all_obs[d, pi, :]]
             top_actions = [self._env.SAY]
             top_desc_out_mask = [1]
             top_desc = [desc]
@@ -166,30 +204,30 @@ class TopDownParser(object):
             #actions = [demo[k][1] for k in range(i, j)] + [self._env.STOP]
             #desc_out_mask = [0 for _ in actions]
             #desc = [[None] for _ in actions]
-            feats = [seq_batch.all_obs[d, j, :]]
-            init_feats = [seq_batch.all_obs[d, i, :]]
+            obs = [seq_batch.all_obs[d, j, :]]
+            init_obs = [seq_batch.all_obs[d, i, :]]
             actions = [self._env.STOP]
             desc_out_mask = [0]
             desc = [[None]]
 
             if score_parent:
-                feats = top_feats + feats
-                init_feats = top_init_feats + init_feats
+                obs = top_obs + obs
+                init_obs = top_init_obs + init_obs
                 actions = top_actions + actions
                 desc_out_mask = top_desc_out_mask + desc_out_mask
                 desc = top_desc + desc
             else:
                 hot_desc = hot_desc[:, 1:, ...]
 
-            feats = torch.stack(feats)
-            init_feats = torch.stack(init_feats)
+            obs = torch.stack(obs)
+            init_obs = torch.stack(init_obs)
             desc_out, desc_out_target = data.load_desc_data(
                 desc, self._dataset, target=True, tokenize=False)
 
             # TODO Batch.of_x
             step_batch = data.StepBatch(
-                init_feats,
-                feats,
+                init_obs,
+                obs,
                 Variable(torch.LongTensor(actions)),
                 None,
                 Variable(torch.FloatTensor(hot_desc)),
@@ -199,8 +237,8 @@ class TopDownParser(object):
             if next(self._policy.parameters()).is_cuda:
                 step_batch = step_batch.cuda()
 
-            rep = self._featurizer(step_batch.init_obs, step_batch.obs)
-            act_logits, (_, desc_logits) = self._policy(rep, step_batch)
+            feats, conv_feats = self._featurizer(step_batch.init_obs, step_batch.obs)
+            act_logits, (_, desc_logits) = self._policy(feats, conv_feats, step_batch)
             scores = self._policy_prob(act_logits, step_batch.act)
             return scores
 
@@ -332,24 +370,26 @@ class Model(object):
     def __init__(self, env, dataset):
         self._env = env
 
-        self._featurizer = StateFeaturizer(env, dataset)
+        self._featurizer = WorldFeaturizer(env, dataset)
         self._policy = Policy(env, dataset)
         #self._flat_policy = Policy(env, dataset)
         self._describer = Decoder(dataset.vocab, ling.START, ling.STOP)
         self._segmenter = Segmenter(env, dataset)
 
-        self._policy_obj = nn.CrossEntropyLoss()
-        self._policy_prob = nn.CrossEntropyLoss(size_average=False, reduce=False)
-        self._desc_prob = nn.CrossEntropyLoss(size_average=False, reduce=False)
+        self._policy_act_obj = nn.CrossEntropyLoss()
+        self._policy_act_prob = nn.CrossEntropyLoss(reduce=False)
+        self._policy_act_pos_obj = nn.CrossEntropyLoss(reduce=False)
+
+        self._desc_prob = nn.CrossEntropyLoss(reduce=False)
         self._describer_obj = nn.CrossEntropyLoss()
         self._segmenter_obj = nn.BCEWithLogitsLoss()
 
         if FLAGS.gpu:
             for module in [
                     self._featurizer, self._policy, #self._flat_policy,
-                    self._describer, self._segmenter, self._policy_obj,
-                    self._policy_prob, self._desc_prob, self._describer_obj,
-                    self._segmenter_obj]:
+                    self._describer, self._segmenter, self._policy_act_obj,
+                    self._policy_act_prob, self._policy_act_pos_obj,
+                    self._desc_prob, self._describer_obj, self._segmenter_obj]:
                 module.cuda()
 
         self._parser = TopDownParser(self, env, dataset)
@@ -364,24 +404,36 @@ class Model(object):
         return self._parser.parse(seq_batch)
 
     def act(self, step_batch, sample=True):
-        rep = self._featurizer(step_batch.init_obs, step_batch.obs)
-        act_logits, _ = self._policy(rep, step_batch)
-        act_probs = self._policy._softmax(act_logits)
+        rep, conv_rep = self._featurizer(step_batch.init_obs, step_batch.obs)
+        act_logits, act_pos_logits, _ = self._policy(rep, conv_rep, step_batch)
+        act_probs = self._policy._act_softmax(act_logits)
         act_probs = act_probs.data.cpu().numpy()
+        act_pos_probs = self._policy._act_pos_softmax(act_pos_logits)
+        act_pos_probs = act_pos_probs.data.cpu().numpy()
         out = []
-        for row in act_probs:
+        for i in range(act_probs.shape[0]):
+            arow = act_probs[i, :]
+            aprow = act_pos_probs[i, :]
             if sample:
-                a = np.random.choice(self._env.n_actions, p=row)
+                a = np.random.choice(arow.size, p=arow)
+                ap = np.random.choice(aprow.size, p=aprow)
             else:
-                a = row.argmax()
-            out.append(a)
+                a = arow.argmax()
+                ap = aprow.argmax()
+            # TODO size from elsewhere
+            ap = np.unravel_index(ap, step_batch.init_obs.shape[2:])
+            out.append((a, ap))
         return out
 
     def train_step(self, step_batch):
-        rep = self._featurizer(step_batch.init_obs, step_batch.obs)
-        act_logits, _ = self._policy(rep, step_batch)
-        pol_loss = self._policy_obj(act_logits, step_batch.act)
-        seg_loss = self._segmenter_obj(self._segmenter(rep), step_batch.final)
+        feats, conv_feats = self._featurizer(step_batch.init_obs, step_batch.obs)
+        act_logits, act_pos_logits, _ = self._policy(feats, conv_feats, step_batch)
+        pol_loss = (
+            self._policy_act_obj(act_logits, step_batch.act)
+            + (self._policy_act_pos_obj(act_pos_logits, step_batch.act_pos)
+                * step_batch.act_pos_mask).mean())
+
+        seg_loss = self._segmenter_obj(self._segmenter(feats), step_batch.final)
         loss = pol_loss + seg_loss
         self._opt.zero_grad()
         loss.backward()
@@ -389,8 +441,8 @@ class Model(object):
         return Counter({'pol_loss': loss.data.cpu().numpy()[0]})
 
     def train_seq(self, seq_batch):
-        rep = self._featurizer(seq_batch.init_obs, seq_batch.last_obs)
-        _, desc_logits = self._describer(rep.unsqueeze(0), seq_batch.desc)
+        feats, conv_feats = self._featurizer(seq_batch.init_obs, seq_batch.last_obs)
+        _, desc_logits = self._describer(feats.unsqueeze(0), seq_batch.desc)
         n_tok, n_batch, n_pred = desc_logits.shape
         desc_loss = self._describer_obj(
             desc_logits.view(n_tok * n_batch, n_pred),

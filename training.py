@@ -20,34 +20,31 @@ def rollout(task, model, dataset, env):
     desc = torch.autograd.Variable(desc_data.cuda())
 
     state = task.init_state
-    init_features = Variable(torch.FloatTensor([state.features()]))
+    init_obs = Variable(torch.FloatTensor([state.obs()]))
     steps = []
     for _ in range(FLAGS.n_rollout_max):
-        features = Variable(torch.FloatTensor([state.features()]))
+        obs = Variable(torch.FloatTensor([state.obs()]))
         batch = data.StepBatch(
-            init_features,
-            features,
-            None, None,
+            init_obs,
+            obs,
+            None, None, None, None,
             desc,
             None, None, None)
         batch = batch.cuda() 
-        action, = model.act(batch, sample=False)
+        action, = model.act(batch, sample=True)
+        if action[0] != env.GO:
+            action = (action[0], None)
         s_ = state.step(action)
         steps.append((state, action, s_))
         state = s_
-        if action == env.STOP:
+        if action[0] == env.STOP:
             break
     return steps
 
-def validate(model, dataset, env):
-    val_loader = torch.utils.data.DataLoader(
-        dataset, batch_size=FLAGS.n_batch_examples, shuffle=True,
-        num_workers=2,
-        collate_fn=lambda items: data.collate(items, dataset))
-
+def validate(model, dataset, env, loader):
     score = 0.
     tot = 0.
-    for batch in islice(val_loader, 10):
+    for batch in islice(loader, 1):
         for task in batch.tasks:
             print(task.desc)
             print('gold', [a for s, a, s_ in task.demonstration()])
@@ -61,7 +58,16 @@ def validate(model, dataset, env):
             tot += 1
     score /= tot
     hlog.value('score', score)
-    return {'score': score}
+    ret = {'score': score}
+
+    with open('vis/before.json', 'w') as scene_f:
+        task.scene_before.dump(scene_f)
+    with open('vis/after.json', 'w') as scene_f:
+        last_state.to_scene().dump(scene_f)
+    with open('vis/after_gold.json', 'w') as scene_f:
+        task.scene_after.dump(scene_f)
+
+    return ret
 
     #val_stats = Counter()
     #val_count = 0

@@ -4,6 +4,10 @@ import numpy as np
 
 MAX_TRIES = 20
 
+class BuilderException(Exception):
+    def __init__(self, msg):
+        super().__init__(msg)
+
 class BlockType(namedtuple('BlockType', ['material'])):
     _materials = [
         'grass',
@@ -109,6 +113,9 @@ class Block(namedtuple('Block', ['pos', 'block_type'])):
 
     def positions(self):
         return {self.pos}
+
+    def blocks(self):
+        yield self
 
 class Window(namedtuple('Window', ['pos', 'parent'])):
     def descriptions(self, top=False, mentioned=[]):
@@ -233,8 +240,13 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'courses', 'window', 'door',
             door_x = x + length // 2
             door_z = z
 
-        window = Window((window_x, y+height-2, window_z), []) if n_windows == 1 else None
-        door = Door((door_x, y, door_z), []) if n_doors == 1 else None
+        window = None
+        door = None
+        if not incomplete:
+            if n_windows == 1:
+                window = Window((window_x, y+height-2, window_z), [])
+            if n_doors == 1:
+                door = Door((door_x, y, door_z), [])
 
         courses = []
         for h in range(course_height):
@@ -282,7 +294,8 @@ class Wall(namedtuple('Wall', ['pos', 'block_type', 'courses', 'window', 'door',
 
     def parts(self):
         yield self
-        yield self.courses[-1]
+        if len(self.courses) > 0:
+            yield self.courses[-1]
         if self.door is not None:
             yield self.door
         if self.window is not None:
@@ -542,8 +555,9 @@ class Scene(object):
         for part in parts:
             blocks = [part] if isinstance(part, Block) else part.blocks()
             for block in blocks:
-                assert occupied[block.pos] == 0, \
-                        '%s space already occupied when removing %s' % (part, rem)
+                if occupied[block.pos] != 0:
+                    raise BuilderException(
+                        '%s space already occupied when removing %s' % (part, rem))
                 occupied[block.pos] = 1
 
         return Scene(self.size, parts, occupied)

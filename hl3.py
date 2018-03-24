@@ -16,17 +16,18 @@ import torch.utils.data as torch_data
 FLAGS = gflags.FLAGS
 gflags.DEFINE_integer('n_setup_examples', 1000, 'number of examples to use for building vocab etc')
 gflags.DEFINE_integer('n_examples', 10000, 'number of training examples to generate')
-gflags.DEFINE_integer('n_batch_examples', 10, 'number of full trajectories per batch')
-gflags.DEFINE_integer('n_batch_steps', 50, 'number of steps per batch')
-gflags.DEFINE_integer('n_rollout_max', 1000, 'max rollout length')
+gflags.DEFINE_integer('n_batch_examples', 50, 'number of full trajectories per batch')
+gflags.DEFINE_integer('n_batch_steps', 100, 'number of steps per batch')
+gflags.DEFINE_integer('n_rollout_max', 50, 'max rollout length')
 gflags.DEFINE_integer('n_val_batches', 30, 'number of validation batches')
-gflags.DEFINE_integer('n_epochs', 20, 'number of training epochs')
+gflags.DEFINE_integer('n_epochs', 100, 'number of training epochs')
 gflags.DEFINE_integer('n_log', 100, 'logging frequency')
-#gflags.DEFINE_string('cache_dir', '/data/jda/hl3/_cache', 'feature cache directory')
-gflags.DEFINE_string('cache_dir', '/data/jda/hl3/_cache_simple', 'feature cache directory')
+gflags.DEFINE_string('cache_dir', '/data/jda/hl3/_cache', 'feature cache directory')
 #gflags.DEFINE_string('cache_dir', None, 'feature cache directory')
 gflags.DEFINE_boolean('gpu', True, 'use the gpu')
 gflags.DEFINE_boolean('debug', False, 'debug model')
+
+np.set_printoptions(linewidth=1000, precision=2, suppress=True)
 
 ENV = CraftEnv
 #ENV = NavEnv
@@ -46,6 +47,11 @@ def main():
     loader = torch_data.DataLoader(
         dataset, batch_size=FLAGS.n_batch_examples, shuffle=True, 
         num_workers=4,
+        collate_fn=lambda items: data.collate(items, dataset))
+
+    val_loader = torch_data.DataLoader(
+        dataset, batch_size=FLAGS.n_batch_examples, shuffle=True,
+        num_workers=1,
         collate_fn=lambda items: data.collate(items, dataset))
 
     with hlog.task('train'):
@@ -75,9 +81,9 @@ def main():
                 i_iter += 1
                 if i_iter % FLAGS.n_log == 0:
                     with hlog.task('eval_train', timer=False):
-                        training.validate(model, dataset, ENV)
+                        training.validate(model, dataset, ENV, loader)
                     with hlog.task('eval_val', timer=False):
-                        training.validate(model, val_dataset, ENV)
+                        training.validate(model, val_dataset, ENV, loader)
                     _log(stats, model)
                     stats = Counter()
 
