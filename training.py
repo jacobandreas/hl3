@@ -41,10 +41,10 @@ def rollout(task, model, dataset, env):
             break
     return steps
 
-def validate(model, dataset, env, loader):
+def validate(model, dataset, env, loader, log_name):
     score = 0.
     tot = 0.
-    for batch in islice(loader, 1):
+    for batch in loader:
         for task in batch.tasks:
             print(task.desc)
             print('gold', [a for s, a, s_ in task.demonstration()])
@@ -60,11 +60,11 @@ def validate(model, dataset, env, loader):
     hlog.value('score', score)
     ret = {'score': score}
 
-    with open('vis/before.json', 'w') as scene_f:
+    with open('vis/before.%s.json' % log_name, 'w') as scene_f:
         task.scene_before.dump(scene_f)
-    with open('vis/after.json', 'w') as scene_f:
+    with open('vis/after.%s.json' % log_name, 'w') as scene_f:
         last_state.to_scene().dump(scene_f)
-    with open('vis/after_gold.json', 'w') as scene_f:
+    with open('vis/after_gold.%s.json' % log_name, 'w') as scene_f:
         task.scene_after.dump(scene_f)
 
     return ret

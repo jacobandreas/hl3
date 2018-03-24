@@ -373,14 +373,14 @@ class Task(object):
         added = np.where(final_blocks > init_blocks)
         removed = np.where(init_blocks > final_blocks)
 
-        a_x, a_y, a_z = added
-        a_x, a_y, a_z = set(a_x), set(a_y), set(a_z)
-        added_distinct = sorted([len(a_x), len(a_y), len(a_z)])
-        r_x, r_y, r_z = removed
-        r_x, r_y, r_z = set(r_x), set(r_y), set(r_z)
-        removed_distinct = sorted([len(r_x), len(r_y), len(r_z)])
+        #a_x, a_y, a_z = added
+        #a_x, a_y, a_z = set(a_x), set(a_y), set(a_z)
+        #added_distinct = sorted([len(a_x), len(a_y), len(a_z)])
+        #r_x, r_y, r_z = removed
+        #r_x, r_y, r_z = set(r_x), set(r_y), set(r_z)
+        #removed_distinct = sorted([len(r_x), len(r_y), len(r_z)])
 
-        return added_distinct, removed_distinct, parts
+        #return added_distinct, removed_distinct, parts
 
     # TODO SO MUCH REFACTORING
     def _validate_add(self, state):
