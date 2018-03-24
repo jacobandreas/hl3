@@ -159,6 +159,8 @@ class Task(object):
         def part_filter(part):
             if action == cls.ADD and isinstance(part, Block):
                 return False
+            if action == cls.ADD and isinstance(part, Wall) and part.incomplete:
+                return False
             if action == cls.ADD or action == cls.REMOVE:
                 return (
                     not isinstance(part, House) 
@@ -373,6 +375,25 @@ class Task(object):
         added = np.where(final_blocks > init_blocks)
         removed = np.where(init_blocks > final_blocks)
 
+        if len(added[0]) == 0:
+            added_shape = added_missing = None
+        else:
+            added_bbox = ([min(a) for a in added], [max(a)+1 for a in added])
+            ((x1, y1, z1), (x2, y2, z2)) = added_bbox
+            box_blocks = final_blocks[x1:x2, y1:y2, z1:z2]
+            added_missing = box_blocks.size - box_blocks.sum()
+            added_shape = (x2-x1, y2-y1, z2-z1)
+        if len(removed[0]) == 0:
+            removed_shape = removed_missing = None
+        else:
+            removed_bbox = ([min(r) for r in removed], [max(r)+1 for r in removed])
+            ((x1, y1, z1), (x2, y2, z2)) = removed_bbox
+            box_blocks = final_blocks[x1:x2, y1:y2, z1:z2]
+            removed_missing = box_blocks.sum()
+            removed_shape = (x2-x1, y2-y1, z2-z1)
+
+        return added_shape, added_missing, removed_shape, removed_missing, parts
+
         #a_x, a_y, a_z = added
         #a_x, a_y, a_z = set(a_x), set(a_y), set(a_z)
         #added_distinct = sorted([len(a_x), len(a_y), len(a_z)])
@@ -382,98 +403,76 @@ class Task(object):
 
         #return added_distinct, removed_distinct, parts
 
-    # TODO SO MUCH REFACTORING
     def _validate_add(self, state):
-        added_distinct, removed_distinct, _ = self._get_delta(state)
-        added_any = added_distinct != [0, 0, 0]
-        removed_any = removed_distinct != [0, 0, 0]
+        added_shape, added_missing, removed_shape, removed_missing, _ = self._get_delta(state)
 
         # TODO actually located in wall
         if isinstance(self.part, Window):
-            if added_distinct != [0, 0, 0]:
-                return 0.
-            if removed_distinct != [1, 1, 1]:
-                return 0.
-            return 1.
+            return float(
+                added_shape is None
+                and removed_missing == 0
+                and removed_shape == (1, 1, 1))
 
         # TODO actually located in wall
-        # TODO direction
         elif isinstance(self.part, Door):
-            if added_distinct != [0, 0, 0]:
-                return 0.
-            if removed_distinct != [1, 1, 2]:
-                return 0.
-            return 1.
+            return float(
+                added_shape is None
+                and removed_missing == 0
+                and removed_shape == (1, 2, 1))
 
         # TODO validate block type
-        # TODO direction
         elif isinstance(self.part, Course):
-            if removed_distinct != [0, 0, 0]:
-                return 0.
-            if added_distinct[:2] != [1, 1]:
-                return 0.
-            if added_distinct[2] < 2:
-                return 0.
-            return 1.
+            return float(
+                removed_shape is None
+                and added_missing <= 1
+                and added_shape[1] == 1
+                and ((added_shape[0] == 1 and added_shape[2] > 1)
+                     or (added_shape[2] == 1 and added_shape[0] > 1)))
 
-        return 0.5
+        elif isinstance(self.part, Wall):
+            return float(
+                removed_shape is None
+                and added_missing <= 3
+                and added_shape[1] > 1
+                and ((added_shape[0] == 1 and added_shape[2] > 1)
+                     or (added_shape[2] == 1 and added_shape[0] > 1)))
+
+        print(self.desc)
+        assert False
 
     def _validate_remove(self, state):
-        added_distinct, removed_distinct, candidates = self._get_delta(state)
-        added_any = added_distinct != [0, 0, 0]
-        removed_any = removed_distinct != [0, 0, 0]
+        added_shape, added_missing, removed_shape, removed_missing, candidates = self._get_delta(state)
 
         if isinstance(self.part, Block):
-            if added_any:
-                return 0.
-            if removed_distinct != [1, 1, 1]:
-                return 0.
             removed = [
                 not state.blocks[:, p.pos[0], p.pos[1], p.pos[2]].any()
                 for p in candidates]
-            if not any(removed):
-                return 0.
-            return 1.
+            return float(
+                added_shape is None
+                and removed_shape == (1, 1, 1)
+                and any(removed))
 
-        if isinstance(self.part, Window):
-            if removed_any:
-                return 0.
-            if added_distinct != [1, 1, 1]:
-                return 0.
-            filled = []
-            for p in candidates:
-                # TODO global property of wall
-                mat = next(p.parent[0].blocks()).block_type.mat_id()
-                x, y, z = p.pos
-                filled.append(state.blocks[mat, x, y, z] == 1)
-            if not any(filled):
-                return 0.
-            return 1.
-
-        # TODO validate block type
-        # TODO validate actually located in wall
-        elif isinstance(self.part, Door):
-            if removed_any:
-                return 0.
-            if added_distinct != [1, 1, 2]:
-                return 0.
+        if isinstance(self.part, Window) or isinstance(self.part, Door):
             filled = []
             for p in candidates:
                 # TODO global property of wall
                 mat = next(p.parent[0].blocks()).block_type.mat_id()
                 filled.append(all(
-                    state.blocks[mat, x, y, z] == 1 for x, y, z in p.positions()))
-            if not any(filled):
-                return 0.
-            return 1.
+                    state.blocks[mat, x, y, z] == 1
+                    for x, y, z in p.positions()))
+            return float(
+                removed_shape is None
+                and any(filled))
 
-        elif isinstance(self.part, Course):
-            if added_any:
-                return 0.
-            if removed_distinct[:2] != [1, 1]:
-                return 0.
-            if removed_distinct[2] < 2:
-                return 0.
-            return 1.
+        if isinstance(self.part, Course) or isinstance(self.part, Wall):
+            removed = []
+            for p in candidates:
+                removed.append(all(
+                    not state.blocks[:, x, y, z].any()
+                    for x, y, z in p.positions()))
+            return float(
+                added_shape is None
+                and any(removed))
 
-        return 0.5
+        print(self.desc)
+        assert False
