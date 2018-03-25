@@ -310,7 +310,7 @@ class Task(object):
             state = s_
         return demo, state
 
-    def validate(self, state, debug=True):
+    def validate(self, state, debug=False):
         init_pos = self.init_state.pos
         final_pos = state.pos
 
@@ -325,8 +325,8 @@ class Task(object):
             gx1, gz1 = max(gx-2, 0), max(gz-2, 0)
             gx2, gz2 = gx+2, gz+2
             gl = state.blocks[:, gx1:gx2+1, :, gz1:gz2+1].sum(axis=(0, 2))
-            print("sl")
-            print(sl)
+            #print("sl")
+            #print(sl)
             #print("gl")
             #print(gl)
             #print("everything")
@@ -410,6 +410,7 @@ class Task(object):
         if isinstance(self.part, Window):
             return float(
                 added_shape is None
+                and removed_shape is not None
                 and removed_missing == 0
                 and removed_shape == (1, 1, 1))
 
@@ -417,6 +418,7 @@ class Task(object):
         elif isinstance(self.part, Door):
             return float(
                 added_shape is None
+                and removed_shape is not None
                 and removed_missing == 0
                 and removed_shape == (1, 2, 1))
 
@@ -424,6 +426,7 @@ class Task(object):
         elif isinstance(self.part, Course):
             return float(
                 removed_shape is None
+                and added_shape is not None
                 and added_missing <= 1
                 and added_shape[1] == 1
                 and ((added_shape[0] == 1 and added_shape[2] > 1)
@@ -432,6 +435,7 @@ class Task(object):
         elif isinstance(self.part, Wall):
             return float(
                 removed_shape is None
+                and added_shape is not None
                 and added_missing <= 3
                 and added_shape[1] > 1
                 and ((added_shape[0] == 1 and added_shape[2] > 1)
@@ -449,6 +453,7 @@ class Task(object):
                 for p in candidates]
             return float(
                 added_shape is None
+                and removed_shape is not None
                 and removed_shape == (1, 1, 1)
                 and any(removed))
 

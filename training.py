@@ -41,21 +41,35 @@ def rollout(task, model, dataset, env):
             break
     return steps
 
+def visualize(scenes, prefix):
+    for name, scene in scenes.items():
+        with open('%s_%s.json' % (prefix, name), 'w') as scene_f:
+            scene.dump(scene_f)
+
 def validate(model, dataset, env, loader, log_name):
     score = 0.
     tot = 0.
     for batch in loader:
-        for task in batch.tasks:
-            print(task.desc)
-            print('gold', [a for s, a, s_ in task.demonstration()])
+        for i_task, task in enumerate(batch.tasks):
             steps = rollout(task, model, dataset, env)
-            print('pred', [a for s, a, s_ in steps])
             last_state = steps[-1][0]
             score_here = task.validate(last_state)
-            print(score_here)
-            print()
             score += score_here
             tot += 1
+
+            if i_task < 5:
+                with hlog.task(str(i_task), timer=False):
+                    hlog.value('desc', task.desc)
+                    hlog.value('gold', [a for s, a, s_ in task.demonstration()])
+                    hlog.value('pred', [a for s, a, s_ in steps])
+                    hlog.value('score', score_here)
+                    visualize(
+                        {
+                            'before': task.scene_before,
+                            'after': last_state.to_scene(),
+                        },
+                        'vis/scenes/%s_%d' % (log_name, i_task))
+
     score /= tot
     hlog.value('score', score)
     ret = {'score': score}
