@@ -106,3 +106,5 @@ ENV/
 # vis
 vis/node_modules
 vis/*.json
+vis/scenes
+*.lprof
