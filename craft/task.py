@@ -24,9 +24,10 @@ class CraftEnv(object):
     SAY = 5
     n_actions = 6
     
-    env_shape = Scene._size
+    world_shape = Scene._size
     n_block_types = 1 + len(BlockType.enumerate())
-    n_world_obs = n_block_types + n_block_types
+    n_world_obs = n_block_types + 1
+    n_state_obs = n_block_types + (5 * 5 * 5 * n_block_types)
 
     _action_names = {
             GO: 'g',
@@ -61,7 +62,7 @@ class CraftEnv(object):
 class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
     @classmethod
     def from_scene(cls, scene, pos, mat):
-        blocks = np.zeros((CraftEnv.n_block_types,) + CraftEnv.env_shape)
+        blocks = np.zeros((CraftEnv.n_block_types,) + CraftEnv.world_shape)
         for block in scene.blocks():
             blocks[(block.block_type.mat_id(),) + block.pos] = 1
         return CraftState(blocks, pos, mat)
@@ -128,11 +129,28 @@ class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
             assert False, "unknown action %d" % action
 
     def obs(self):
-        pos_features = np.zeros((CraftEnv.n_block_types,) + CraftEnv.env_shape)
+        pos_features = np.zeros((1,) + CraftEnv.world_shape)
         x, y, z = self.pos
-        pos_features[self.mat, x, y, z] = 1
-        out = np.concatenate((self.blocks, pos_features), axis=0)
-        return out
+        pos_features[0, x, y, z] = 1
+        world_features = np.concatenate((self.blocks, pos_features), axis=0)
+
+        def pad_slice(f, w, h, d, x, y, z, data):
+            e = np.zeros((f, w+4, h+4, d+4))
+            e[:, 2:-2, 2:-2, 2:-2] = data
+            ft = e[:, x-2+2:x+3+2, y-2+2:y+3+2, z-2+2:z+3+2]
+            assert ft.shape[1:] == (5, 5, 5), \
+                "bad slice with %d %d %d / %d %d %d" % (w, h, d, x, y, z)
+            return ft
+
+        f = CraftEnv.n_block_types
+        w, h, d = CraftEnv.world_shape
+        local_features = pad_slice(f, w, h, d, x, y, z, self.blocks)
+        mat_features = np.zeros((CraftEnv.n_block_types,))
+        mat_features[self.mat] = 1
+        state_features = np.concatenate((
+            local_features.ravel(), mat_features))
+
+        return state_features, world_features
 
 class Task(object):
     FIND = 0
@@ -228,10 +246,6 @@ class Task(object):
         here = ' here' if self.here else ''
         yield '%s %s%s' % (self._action_names[self.action], self._part_desc, here)
 
-    def dump(self):
-        with open('../vis/scene.json', 'w') as scene_f:
-            self.scene_before.dump(scene_f)
-
     def demonstration(self):
         if self.action == self.FIND:
             demo, state = self._demonstrate_find(self.init_state)
@@ -240,7 +254,7 @@ class Task(object):
         else:
             demo, state = self._demonstrate_change(self.init_state)
         demo.append((state, (CraftEnv.STOP, None), None))
-        assert self.validate(demo[-1][0], debug=False) > 0
+        assert self.validate(demo[-1][0], debug=False) > 0, self.desc
         return demo
 
     def _demonstrate_find(self, state):
@@ -437,7 +451,7 @@ class Task(object):
                 removed_shape is None
                 and added_shape is not None
                 and added_missing <= 3
-                and added_shape[1] > 1
+                and added_shape[1] >= 1
                 and ((added_shape[0] == 1 and added_shape[2] > 1)
                      or (added_shape[2] == 1 and added_shape[0] > 1)))
 

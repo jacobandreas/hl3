@@ -14,20 +14,25 @@ import sys
 import torch.utils.data as torch_data
 
 FLAGS = gflags.FLAGS
-gflags.DEFINE_integer('n_setup_examples', 1000, 'number of examples to use for building vocab etc')
-gflags.DEFINE_integer('n_examples', 10000, 'number of training examples to generate')
-gflags.DEFINE_integer('n_batch_examples', 50, 'number of full trajectories per batch')
-gflags.DEFINE_integer('n_batch_steps', 100, 'number of steps per batch')
+gflags.DEFINE_integer('n_setup_examples', 1000, 'num examples to use for building vocab etc')
+gflags.DEFINE_integer('n_examples', 2000, 'num training examples to generate')
+gflags.DEFINE_integer('n_batch_examples', 50, 'num full trajectories per batch')
+gflags.DEFINE_integer('n_batch_steps', 100, 'num steps per batch')
 gflags.DEFINE_integer('n_rollout_max', 50, 'max rollout length')
-gflags.DEFINE_integer('n_val_batches', 1, 'number of validation batches')
-gflags.DEFINE_integer('n_epochs', 100, 'number of training epochs')
-gflags.DEFINE_integer('n_log', 100, 'logging frequency')
+gflags.DEFINE_integer('n_val_batches', 1, 'num validation batches')
+gflags.DEFINE_integer('n_epochs', 1, 'num training epochs')
+gflags.DEFINE_integer('n_flat_passes', 20, 'num passes per epoch for flat policy')
+gflags.DEFINE_integer('n_hier_passes', 1, 'num passes per epoch for hierarchical policy')
+#gflags.DEFINE_integer('n_log', 100, 'num passes after which to log')
 gflags.DEFINE_string('cache_dir', '/data/jda/hl3/_cache', 'feature cache directory')
+gflags.DEFINE_string('model_dir', '_models', 'model checkpoint directory')
+gflags.DEFINE_integer('resume_epoch', None, 'epoch from which to resume')
+gflags.DEFINE_boolean('resume_flat', False, 'resume from the flat step')
 #gflags.DEFINE_string('cache_dir', None, 'feature cache directory')
 gflags.DEFINE_boolean('gpu', True, 'use the gpu')
 gflags.DEFINE_boolean('debug', False, 'debug model')
 
-np.set_printoptions(linewidth=1000, precision=2, suppress=True)
+#np.set_printoptions(linewidth=1000, precision=2, suppress=True)
 
 ENV = CraftEnv
 #ENV = NavEnv
@@ -35,8 +40,6 @@ ENV = CraftEnv
 def _log(stats, model):
     for k, v in stats.items():
         hlog.value(k, v / FLAGS.n_log)
-    #with hlog.task('val'):
-    #    training.validate(model, val_dataset, parse_ex, ENV)
 
 @profile
 def main():
@@ -55,40 +58,25 @@ def main():
         collate_fn=lambda items: data.collate(items, val_dataset))
 
     with hlog.task('train'):
-        stats = Counter()
         i_iter = 0
-        for i_epoch in hlog.loop('epoch_%05d', range(FLAGS.n_epochs)):
-            # TODO magic
-            max_parse_len = (i_epoch // 2) * 10
-            max_train_len = (i_epoch // 2 + 1) * 10
-            for i_batch, batch in hlog.loop('batch_%05d', enumerate(loader), timer=False):
-                pbatch, pkept = batch.length_filter(max_parse_len)
-                tbatch, tkept = batch.length_filter(max_train_len)
+        for i_epoch in hlog.loop('epoch_%03d', range(FLAGS.n_epochs)):
+            # flat step
+            for i_pass in hlog.loop('flat_%03d', range(FLAGS.n_flat_passes)):
+                stats = Counter()
+                for i_batch, batch in hlog.loop(
+                        'batch_%05d', enumerate(loader), timer=False):
+                    seq_batch = data.SeqBatch.of(batch)
+                    step_batch = data.StepBatch.of(batch, parses=None, dataset)
+                    stats += model.train_seq(seq_batch)
+                    stats += model.train_step(step_batch)
+                _log(stats, model)
 
-                with hlog.task('e-step', timer=False):
-                    #if tkept > 0 and pkept > 0:
-                    #    seq_pbatch = data.SeqBatch.of(pbatch, dataset)
-                    #    parses = model.parse(seq_pbatch)
-                    parses = data.ParseBatch.empty()
+            # parse
+            pass
 
-                with hlog.task('m-step', timer=False):
-                    if tkept > 0:
-                        seq_tbatch = data.SeqBatch.of(tbatch, dataset)
-                        step_tbatch = data.StepBatch.of(tbatch, parses, dataset)
-                        stats += model.train_step(step_tbatch)
-                        stats += model.train_seq(seq_tbatch)
-
-                i_iter += 1
-                if i_iter % FLAGS.n_log == 0:
-                    #with hlog.task('eval_train', timer=False):
-                    #    training.validate(model, dataset, ENV, loader, "train_%d" % i_iter)
-                    with hlog.task('eval_val', timer=False):
-                        training.validate(model, val_dataset, ENV, val_loader, "val_%d" % i_iter)
-                    _log(stats, model)
-                    stats = Counter()
-
-                    #seq_batch = data.SeqBatch.of([[p] for p in parse_ex], val_dataset)
-                    #model.parse(seq_batch)
+            # hier step
+            for i_pass in hlog.loop('hier_%03d', range(FLAGS.n_hier_passes)):
+                pass
 
 if __name__ == '__main__':
     gflags.FLAGS(sys.argv)

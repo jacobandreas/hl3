@@ -13,65 +13,78 @@ from tqdm import tqdm
 
 FLAGS = gflags.FLAGS
 
-class Batch(namedtuple('Batch', ['tasks', 'actions', 'obs'])):
+class Batch(namedtuple('Batch', ['tasks', 'actions', 'state_obs', 'world_obs'])):
     def length_filter(self, max_len):
-        tasks = []
-        actions = []
-        obs = []
-        for i in range(len(self.tasks)):
-            if len(self.actions[i]) < max_len:
-                tasks.append(self.tasks[i])
-                actions.append(self.actions[i])
-                obs.append(self.obs[i])
+        indices = [i for i in range(len(self.tasks)) if len(self.actions[i]) < max_len]
+        tasks = [self.tasks[i] for i in indices]
+        actions = [self.actions[i] for i in indices]
+        state_obs = [self.state_obs[i] for i in indices]
+        world_obs = [self.world_obs[i] for i in indices]
         kept = len(tasks)
-        return Batch(tasks, actions, obs), kept
+        return Batch(tasks, actions, state_obs, world_obs), kept
 
-class ParseBatch(namedtuple('ParseBatch', ['descs', 'actions', 'obs'])):
+class ParseBatch(namedtuple('ParseBatch',
+        ['descs', 'actions', 'state_obs', 'world_obs'])):
     @classmethod
     def empty(cls):
-        return ParseBatch([], [], [])
+        return ParseBatch([], [], [], [])
 
 class SeqBatch(namedtuple('SeqBatch',
-        ['desc', 'desc_target', 'init_obs', 'last_obs', 'all_obs', 'tasks'])):
+        ['desc', 'desc_target', 'init_state_obs', 'last_state_obs',
+            'all_state_obs', 'init_world_obs', 'last_world_obs',
+            'all_world_obs', 'tasks'])):
 
     def cuda(self):
         cu_args = [a.cuda() if isinstance(a, Variable) else a for a in self]
         return SeqBatch(*cu_args)
 
+    # TODO dup dup dup
     @classmethod
     def of(cls, batch, dataset):
-        tasks, _, obs = batch
+        tasks, _, state_obs, world_obs = batch
 
-        max_demo_len = max(o.shape[0] for o in obs)
-        n_obs = obs[0].shape[1:]
+        max_demo_len = max(o.shape[0] for o in state_obs)
+        n_state_obs = state_obs[0].shape[1:]
+        n_world_obs = world_obs[0].shape[1:]
 
         desc = []
-        init_obs = np.zeros((len(tasks),) + n_obs)
-        last_obs = np.zeros((len(tasks),) + n_obs)
-        all_obs = np.zeros((len(tasks), max_demo_len,) + n_obs)
+        init_state_obs = np.zeros((len(tasks),) + n_state_obs)
+        last_state_obs = np.zeros((len(tasks),) + n_state_obs)
+        all_state_obs = np.zeros((len(tasks), max_demo_len,) + n_state_obs)
+        init_world_obs = np.zeros((len(tasks),) + n_world_obs)
+        last_world_obs = np.zeros((len(tasks),) + n_world_obs)
+        all_world_obs = np.zeros((len(tasks), max_demo_len,) + n_world_obs)
         for task_id in range(len(tasks)):
-            demo_len = obs[task_id].shape[0]
+            demo_len = state_obs[task_id].shape[0]
             desc.append(tasks[task_id].desc)
-            init_obs[task_id, ...] = obs[task_id][0, ...]
-            last_obs[task_id, ...] = obs[task_id][-1, ...]
-            all_obs[task_id, :demo_len, ...] = obs[task_id]
+            init_state_obs[task_id, ...] = state_obs[task_id][0, ...]
+            last_state_obs[task_id, ...] = state_obs[task_id][-1, ...]
+            all_state_obs[task_id, :demo_len, ...] = state_obs[task_id]
+            init_world_obs[task_id, ...] = world_obs[task_id][0, ...]
+            last_world_obs[task_id, ...] = world_obs[task_id][-1, ...]
+            all_world_obs[task_id, :demo_len, ...] = world_obs[task_id]
 
         desc_data, desc_target_data = load_desc_data(desc, dataset, target=True)
-        init_obs_data = torch.FloatTensor(init_obs)
-        last_obs_data = torch.FloatTensor(last_obs)
-        all_obs_data = torch.FloatTensor(all_obs)
+        init_state_obs_data = torch.FloatTensor(init_state_obs)
+        last_state_obs_data = torch.FloatTensor(last_state_obs)
+        all_state_obs_data = torch.FloatTensor(all_state_obs)
+        init_world_obs_data = torch.FloatTensor(init_world_obs)
+        last_world_obs_data = torch.FloatTensor(last_world_obs)
+        all_world_obs_data = torch.FloatTensor(all_world_obs)
         out = SeqBatch(
             Variable(desc_data), Variable(desc_target_data),
-            Variable(init_obs_data), Variable(last_obs_data),
-            Variable(all_obs_data), tasks)
+            Variable(init_state_obs_data), Variable(last_state_obs_data),
+            Variable(all_state_obs_data), Variable(init_world_obs_data), 
+            Variable(last_world_obs_data), Variable(all_world_obs_data), tasks)
 
         if FLAGS.gpu:
             out = out.cuda()
         return out
 
 class StepBatch(namedtuple('StepBatch',
-        ['init_obs', 'obs', 'act', 'act_pos', 'act_pos_mask', 'final',
-            'desc_in', 'desc_out_mask', 'desc_out', 'desc_out_target'])):
+        ['init_state_obs', 'state_obs', 'init_world_obs', 'world_obs', 'act',
+            'act_pos', 'act_pos_mask', 'final', 'desc_in', 'desc_out_mask',
+            'desc_out', 'desc_out_target'])):
 
     def cuda(self):
         cu_args = [a.cuda() if isinstance(a, Variable) else a for a in self]
@@ -81,13 +94,16 @@ class StepBatch(namedtuple('StepBatch',
     def of(cls, batch, parse_batch, dataset):
         descs = [task.desc for task in batch.tasks] + parse_batch.descs
         actions = list(batch.actions) + list(parse_batch.actions)
-        observations = list(batch.obs) + list(parse_batch.obs)
+        state_observations = list(batch.state_obs) + list(parse_batch.state_obs)
+        world_observations = list(batch.world_obs) + list(parse_batch.world_obs)
         n_tasks = len(descs)
 
-        env_shape = observations[0][0].shape[1:]
+        env_shape = world_observations[0][0].shape[1:]
 
-        init_obs = []
-        obs = []
+        init_state_obs = []
+        state_obs = []
+        init_world_obs = []
+        world_obs = []
         act = []
         act_pos = []
         act_pos_mask = []
@@ -97,16 +113,22 @@ class StepBatch(namedtuple('StepBatch',
             i_task = np.random.randint(n_tasks)
             i_step = np.random.randint(len(actions[i_task]))
             # TODO yuck
-            if isinstance(observations[i_task][0], np.ndarray):
-                init_obs.append(torch.FloatTensor(observations[i_task][0]))
-                obs.append(torch.FloatTensor(observations[i_task][i_step]))
+            if isinstance(state_observations[i_task][0], np.ndarray):
+                init_state_obs.append(torch.FloatTensor(state_observations[i_task][0]))
+                state_obs.append(torch.FloatTensor(state_observations[i_task][i_step]))
+                init_world_obs.append(torch.FloatTensor(world_observations[i_task][0]))
+                world_obs.append(torch.FloatTensor(world_observations[i_task][i_step]))
                 # TODO really yuck
                 if FLAGS.gpu:
-                    init_obs[-1] = init_obs[-1].cuda()
-                    obs[-1] = obs[-1].cuda()
+                    init_state_obs[-1] = init_state_obs[-1].cuda()
+                    state_obs[-1] = state_obs[-1].cuda()
+                    init_world_obs[-1] = init_world_obs[-1].cuda()
+                    world_obs[-1] = world_obs[-1].cuda()
             else:
-                init_obs.append(observations[i_task][0])
-                obs.append(observations[i_task][i_step])
+                init_state_obs.append(state_observations[i_task][0])
+                state_obs.append(state_observations[i_task][i_step])
+                init_world_obs.append(world_observations[i_task][0])
+                world_obs.append(world_observations[i_task][i_step])
             action, action_pos = actions[i_task][i_step]
             act.append(action)
             if action_pos is None:
@@ -119,17 +141,21 @@ class StepBatch(namedtuple('StepBatch',
             final.append(i_step == len(actions[i_task])-1)
             desc_in.append(descs[i_task])
 
-        init_obs_data = torch.stack(init_obs)
-        obs_data = torch.stack(obs)
+        init_state_obs_data = torch.stack(init_state_obs)
+        state_obs_data = torch.stack(state_obs)
+        init_world_obs_data = torch.stack(init_world_obs)
+        world_obs_data = torch.stack(world_obs)
         act_data = torch.LongTensor(act)
         act_pos_data = torch.LongTensor(act_pos)
         act_pos_mask_data = torch.FloatTensor(act_pos_mask)
         final_data = torch.FloatTensor(final)
         desc_in_data = load_desc_data(desc_in, dataset)
         out = StepBatch(
-            Variable(init_obs_data), Variable(obs_data), Variable(act_data),
-            Variable(act_pos_data), Variable(act_pos_mask_data),
-            Variable(final_data), Variable(desc_in_data), None, None, None)
+            Variable(init_state_obs_data), Variable(state_obs_data), 
+            Variable(init_world_obs_data), Variable(world_obs_data),
+            Variable(act_data), Variable(act_pos_data),
+            Variable(act_pos_mask_data), Variable(final_data),
+            Variable(desc_in_data), None, None, None)
 
         if FLAGS.gpu:
             out = out.cuda()
@@ -157,9 +183,10 @@ class DiskDataset(torch_data.Dataset):
             i += len(self.actions) - FLAGS.n_val_batches * self.n_batch
         with open(os.path.join(self.cache_dir, 'tasks', 'task%d.pkl' % i), 'rb') as task_f:
             task = pickle.load(task_f)
-        obs = np.load(os.path.join(self.cache_dir, 'obs', 'path%d.npz' % i))['arr_0']
+        state_obs = np.load(os.path.join(self.cache_dir, 'state_obs', 'path%d.npz' % i))['arr_0']
+        world_obs = np.load(os.path.join(self.cache_dir, 'world_obs', 'path%d.npz' % i))['arr_0']
 
-        return task, self.actions[i], obs
+        return task, self.actions[i], state_obs, world_obs
 
 class DynamicDataset(torch_data.Dataset):
     def __init__(self, n_batch, vocab, env):
@@ -175,22 +202,27 @@ class DynamicDataset(torch_data.Dataset):
         demo = task.demonstration()
         task.validate(demo[-1][0])
         actions = [a for s, a, s_ in demo]
-        obs = np.asarray([s.obs() for s, a, s_ in demo])
-        return task, actions, obs
+        all_obs = [s.obs() for s, a, s_ in demo]
+        state_obs, world_obs = zip(*all_obs)
+        return task, actions, np.asarray(state_obs), np.asarray(world_obs)
 
 def cache_dataset(env):
     os.mkdir(FLAGS.cache_dir)
-    os.mkdir(os.path.join(FLAGS.cache_dir, 'obs'))
+    os.mkdir(os.path.join(FLAGS.cache_dir, 'state_obs'))
+    os.mkdir(os.path.join(FLAGS.cache_dir, 'world_obs'))
     os.mkdir(os.path.join(FLAGS.cache_dir, 'tasks'))
     actions = []
     for i_task in tqdm(list(range(FLAGS.n_examples))):
         task = env.sample_task()
         demo = task.demonstration()
         t_actions = []
-        obs = []
+        state_obs = []
+        world_obs = []
         for s, a, s_ in demo:
             t_actions.append(a)
-            obs.append(s.obs())
+            s_o, w_o = s.obs()
+            state_obs.append(s_o)
+            world_obs.append(w_o)
 
         actions.append(t_actions)
 
@@ -198,8 +230,12 @@ def cache_dataset(env):
             pickle.dump(task, task_f)
 
         np.savez(
-            os.path.join(FLAGS.cache_dir, 'obs', 'path%d.npz' % i_task),
-            np.asarray(obs))
+            os.path.join(FLAGS.cache_dir, 'state_obs', 'path%d.npz' % i_task),
+            np.asarray(state_obs))
+
+        np.savez(
+            os.path.join(FLAGS.cache_dir, 'world_obs', 'path%d.npz' % i_task),
+            np.asarray(world_obs))
 
     with open(os.path.join(FLAGS.cache_dir, 'actions.pkl'), 'wb') as action_f:
         pickle.dump(actions, action_f)
@@ -257,5 +293,5 @@ def load_desc_data(descs, dataset, target=False, tokenize=True):
     return desc_data, target_data
 
 def collate(items, dataset):
-    tasks, actions, obs = zip(*items)
-    return Batch(tasks, actions, obs)
+    tasks, actions, state_obs, world_obs = zip(*items)
+    return Batch(tasks, actions, state_obs, world_obs)

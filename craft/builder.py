@@ -562,14 +562,15 @@ class Scene(object):
 
         return Scene(self.size, parts, occupied)
 
-    def dump(self, fh):
+    def dump(self, label, fh):
         voxels = np.zeros(self.size, dtype=np.int32)
         for block in self.blocks():
             voxels[block.pos] = block.block_type.mat_id()
         data = {
             'voxels': voxels.tolist(),
             #'dimensions': self.size,
-            'position': (0, 1, 0)
+            'position': (0, 1, 0),
+            'label': label
         }
         json.dump(data, fh)
 

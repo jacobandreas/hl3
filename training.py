@@ -20,13 +20,19 @@ def rollout(task, model, dataset, env):
     desc = torch.autograd.Variable(desc_data.cuda())
 
     state = task.init_state
-    init_obs = Variable(torch.FloatTensor([state.obs()]))
+    #init_obs = Variable(torch.FloatTensor([state.obs()]))
+    init_state_obs, init_world_obs = state.obs()
+    init_state_obs = Variable(torch.FloatTensor([init_state_obs]))
+    init_world_obs = Variable(torch.FloatTensor([init_world_obs]))
     steps = []
     for _ in range(FLAGS.n_rollout_max):
-        obs = Variable(torch.FloatTensor([state.obs()]))
+        #obs = Variable(torch.FloatTensor([state.obs()]))
+        state_obs, world_obs = state.obs()
+        state_obs = Variable(torch.FloatTensor([state_obs]))
+        world_obs = Variable(torch.FloatTensor([world_obs]))
         batch = data.StepBatch(
-            init_obs,
-            obs,
+            init_state_obs, state_obs,
+            init_world_obs, world_obs,
             None, None, None, None,
             desc,
             None, None, None)
@@ -42,9 +48,9 @@ def rollout(task, model, dataset, env):
     return steps
 
 def visualize(scenes, prefix):
-    for name, scene in scenes.items():
+    for name, (scene, label) in scenes.items():
         with open('%s_%s.json' % (prefix, name), 'w') as scene_f:
-            scene.dump(scene_f)
+            scene.dump(label, scene_f)
 
 def validate(model, dataset, env, loader, log_name):
     score = 0.
@@ -65,23 +71,14 @@ def validate(model, dataset, env, loader, log_name):
                     hlog.value('score', score_here)
                     visualize(
                         {
-                            'before': task.scene_before,
-                            'after': last_state.to_scene(),
+                            'before': (task.scene_before, task.desc),
+                            'after': (last_state.to_scene(), task.desc),
                         },
                         'vis/scenes/%s_%d' % (log_name, i_task))
 
     score /= tot
     hlog.value('score', score)
-    ret = {'score': score}
-
-    with open('vis/before.%s.json' % log_name, 'w') as scene_f:
-        task.scene_before.dump(scene_f)
-    with open('vis/after.%s.json' % log_name, 'w') as scene_f:
-        last_state.to_scene().dump(scene_f)
-    with open('vis/after_gold.%s.json' % log_name, 'w') as scene_f:
-        task.scene_after.dump(scene_f)
-
-    return ret
+    return {'score': score}
 
     #val_stats = Counter()
     #val_count = 0
