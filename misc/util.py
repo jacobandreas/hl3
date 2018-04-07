@@ -112,3 +112,6 @@ def next_random():
     random = np.random.RandomState(random_counter[0])
     random_counter[0] += 1
     return random
+
+def unwrap(var):
+    return var.data.cpu().numpy()

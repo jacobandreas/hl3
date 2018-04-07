@@ -2,6 +2,8 @@
 
 from craft.builder import Block, BlockType, Scene, House, Window, Door, Wall, Course, Tree
 from craft.builder import BuilderException
+from misc.util import Index
+import ling
 
 from collections import Counter, namedtuple
 import gflags
@@ -37,17 +39,28 @@ class CraftEnv(object):
         STOP: '.',
     }
 
+    def __init__(self):
+        self.vocab = Index()
+        for word in [
+                'a', 'find', 'add', 'remove', 'clone', 'grass', 'red', 'wood',
+                'blue', 'clear', 'tree', 'house', 'wall', 'door', 'window',
+                'course', 'block', 'in', 'with', 'here', 'tall', 'short',
+                ling.START, ling.STOP, ling.UNK]:
+            self.vocab.index(word)
+
     ALLOWED = set([
         'add a wood course',
         'clone a wood block',
         'add a course'])
 
-    @classmethod
-    def sample_task(self):
+    #@classmethod
+    def sample_task(self, task_id, interesting=False):
         while True:
             try:
-                task = Task.sample()
+                task = Task.sample(task_id)
                 if FLAGS.debug and task.desc not in self.ALLOWED:
+                    continue
+                if interesting and task.action not in (Task.ADD, Task.REMOVE):
                     continue
                 break
             except BuilderException as e:
@@ -55,7 +68,7 @@ class CraftEnv(object):
                 pass
         return task
 
-    @classmethod
+    #@classmethod
     def action_name(cls, action):
         return cls._action_names[action]
 
@@ -169,7 +182,7 @@ class Task(object):
     }
 
     @classmethod
-    def sample(cls):
+    def sample(cls, task_id):
         scene1 = Scene.sample()
         action = np.random.choice(cls._actions, p=cls._action_probs)
 
@@ -216,17 +229,20 @@ class Task(object):
             part = blocks[np.random.randint(len(blocks))]
             desc = 'a ' + next(part.block_type.descriptions()) + ' block'
 
-        return Task(action, part, desc, scene_before, scene_after, here)
+        return Task(task_id, action, part, desc, scene_before, scene_after, here)
 
-    def __init__(self, action, part, part_desc, scene_before, scene_after, here):
+    def __init__(self, task_id, action, part, part_desc, scene_before,
+            scene_after, here):
+        self.task_id = task_id
         self.action = action
         self.part = part
+        part_target_opts = list(self.part.positions())
+        self._part_target = part_target_opts[np.random.randint(len(part_target_opts))]
         self._part_desc = part_desc
         self.here = here
         self.desc = next(self._descriptions())
         self.scene_before = scene_before
         self.scene_after = scene_after
-        self.here = here
 
         init_pos = [np.random.randint(dim) for dim in self.scene_before.size]
         mat_ids = [b.mat_id() for b in BlockType.enumerate()]
@@ -241,6 +257,9 @@ class Task(object):
                 init_mat = after_clone[0].mat
         self.init_state = CraftState.from_scene(self.scene_before,
                 tuple(init_pos), init_mat)
+
+        if here:
+            assert self.demonstration()[0][1] != CraftEnv.GO
 
     def _descriptions(self):
         here = ' here' if self.here else ''
@@ -258,9 +277,7 @@ class Task(object):
         return demo
 
     def _demonstrate_find(self, state):
-        goal_opts = list(self.part.positions())
-        goal = goal_opts[np.random.randint(len(goal_opts))]
-        return self._go_to(state, goal)
+        return self._go_to(state, self._part_target)
 
     def _demonstrate_change(self, state):
         blocks_before = set(self.scene_before.blocks())

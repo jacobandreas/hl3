@@ -12,38 +12,34 @@ from torch.autograd import Variable
 FLAGS = gflags.FLAGS
 
 @profile
-def rollout(task, model, dataset, env):
-    desc = ling.tokenize(task.desc, dataset.vocab)
-    desc_data = torch.zeros(len(desc), 1, len(dataset.vocab))
-    for i, tok in enumerate(desc):
-        desc_data[i, 0, tok] = 1
-    desc = torch.autograd.Variable(desc_data.cuda())
-
-    state = task.init_state
-    #init_obs = Variable(torch.FloatTensor([state.obs()]))
-    init_state_obs, init_world_obs = state.obs()
-    init_state_obs = Variable(torch.FloatTensor([init_state_obs]))
-    init_world_obs = Variable(torch.FloatTensor([init_world_obs]))
-    steps = []
+def rollout(tasks, model, dataset, env, act_fn):
+    descs = [task.desc for task in tasks]
+    states = [task.init_state for task in tasks]
+    init_obs = [state.obs() for state in states]
+    steps = [[] for _ in tasks]
+    done = [False for _ in tasks]
     for _ in range(FLAGS.n_rollout_max):
-        #obs = Variable(torch.FloatTensor([state.obs()]))
-        state_obs, world_obs = state.obs()
-        state_obs = Variable(torch.FloatTensor([state_obs]))
-        world_obs = Variable(torch.FloatTensor([world_obs]))
-        batch = data.StepBatch(
-            init_state_obs, state_obs,
-            init_world_obs, world_obs,
-            None, None, None, None,
-            desc,
-            None, None, None)
-        batch = batch.cuda() 
-        action, = model.act(batch, sample=True)
-        if action[0] != env.GO:
-            action = (action[0], None)
-        s_ = state.step(action)
-        steps.append((state, action, s_))
-        state = s_
-        if action[0] == env.STOP:
+        obs = [state.obs() for state in states]
+        batch = data.StepBatch.for_states(init_obs, obs, descs, dataset)
+        actions = act_fn(model)(batch, sample=False)
+
+        states_ = [None for _ in states]
+        for i in range(len(tasks)):
+            s = states[i]
+            if done[i]:
+                states_[i] = s
+                continue
+            a = actions[i]
+            if a[0] != env.GO:
+                a = (a[0], None)
+            s_ = s.step(a)
+            steps[i].append((s, a, s_))
+            states_[i] = s_
+            if a[0] == env.STOP:
+                done[i] = True
+                states_[i] = s
+        states = states_
+        if all(done):
             break
     return steps
 
@@ -52,33 +48,37 @@ def visualize(scenes, prefix):
         with open('%s_%s.json' % (prefix, name), 'w') as scene_f:
             scene.dump(label, scene_f)
 
-def validate(model, dataset, env, loader, log_name):
+def validate(model, dataset, loader, env, log_name, act_fn, dump=False):
     score = 0.
     tot = 0.
-    for batch in loader:
-        for i_task, task in enumerate(batch.tasks):
-            steps = rollout(task, model, dataset, env)
-            last_state = steps[-1][0]
-            score_here = task.validate(last_state)
-            score += score_here
-            tot += 1
-
-            if i_task < 5:
+    for i_batch, batch in enumerate(loader):
+        #task_groups = [batch.tasks[i:i+5] for i in range(0, len(batch.tasks), 5)]
+        task_groups = [batch.tasks]
+        steps = [rollout(tg, model, dataset, env, act_fn) for tg in task_groups]
+        steps = sum(steps, [])
+        last_states = [ss[-1][0] for ss in steps]
+        scores = [t.validate(s) for t, s in zip(batch.tasks, last_states)]
+        score += sum(scores)
+        tot += len(scores)
+        if dump and i_batch == 0:
+            # TODO magic
+            for i_task in range(5):
+                task = batch.tasks[i_task]
                 with hlog.task(str(i_task), timer=False):
                     hlog.value('desc', task.desc)
                     hlog.value('gold', [a for s, a, s_ in task.demonstration()])
-                    hlog.value('pred', [a for s, a, s_ in steps])
-                    hlog.value('score', score_here)
+                    hlog.value('pred', [a for s, a, s_ in steps[i_task]])
+                    hlog.value('score_here', scores[i_task])
                     visualize(
                         {
                             'before': (task.scene_before, task.desc),
-                            'after': (last_state.to_scene(), task.desc),
+                            'after': (last_states[i_task].to_scene(), task.desc),
                         },
                         'vis/scenes/%s_%d' % (log_name, i_task))
 
     score /= tot
-    hlog.value('score', score)
-    return {'score': score}
+    with hlog.task(log_name, timer=False):
+        hlog.value('score', score)
 
     #val_stats = Counter()
     #val_count = 0
