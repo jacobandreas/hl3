@@ -216,17 +216,26 @@ class Model(nn.Module):
         #print(top_actions)
         #print([a == self._env.SAY for a in top_actions])
         
-        # TODO modify init obs
+        ### # TODO modify init obs
+        ### next_descs = []
+        ### for i, a in enumerate(top_actions):
+        ###     if a == self._env.SAY:
+        ###         next_descs.append(Variable(data.load_desc_data(
+        ###             descs[i:i+1], self._dataset, tokenize=False)))
+        ###     else:
+        ###         next_descs.append(step_batch.desc_in[:, i:i+1, :])
+        ### # TODO not here
+        ### next_descs = torch.cat([d.cuda() for d in next_descs], dim=1)
+
         next_descs = []
         for i, a in enumerate(top_actions):
             if a == self._env.SAY:
-                next_descs.append(Variable(data.load_desc_data(
-                    descs[i:i+1], self._dataset, tokenize=False)))
+                next_descs.append(descs[i])
             else:
-                next_descs.append(step_batch.desc_in[:, i:i+1, :])
-        # TODO not here
-        next_descs = torch.cat([d.cuda() for d in next_descs], dim=1)
-        flat_batch = step_batch._replace(desc_in=next_descs)
+                next_descs.append(step_batch.desc[i])
+        next_descs = Variable(
+            data.load_desc_data(next_descs, self._dataset, tokenize=False))
+        flat_batch = step_batch._replace(desc_in=next_descs).cuda()
         return self.act(flat_batch, sample=sample)
 
     def _logprob_of(self, policy, feats, step_batch):

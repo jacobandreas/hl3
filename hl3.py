@@ -24,7 +24,7 @@ gflags.DEFINE_integer('n_batch_steps', 100, 'num steps per batch')
 gflags.DEFINE_integer('n_rollout_max', 50, 'max rollout length')
 gflags.DEFINE_integer('n_epochs', 5, 'num training epochs')
 gflags.DEFINE_integer('n_flat_passes', 60, 'num passes per epoch for flat policy')
-gflags.DEFINE_integer('n_hier_passes', 50, 'num passes per epoch for hierarchical policy')
+gflags.DEFINE_integer('n_hier_passes', 60, 'num passes per epoch for hierarchical policy')
 gflags.DEFINE_integer('n_log', 20, 'num passes after which to log')
 gflags.DEFINE_string('cache_dir', '/data/jda/hl3/_cache', 'feature cache directory')
 gflags.DEFINE_string('val_cache_dir', '/data/jda/hl3/_val_cache', 'val feature cache directory')
@@ -99,16 +99,14 @@ def main():
         num_workers=1,
         collate_fn=lambda items: data.collate(items, val_dataset))
 
-    loader = vtrain_loader
-
     @hlog.fn('exec')
     def validate():
         for d, l, n, f in [
                 (dataset, vtrain_loader, 'train', lambda m: m.act),
                 (dataset, vtrain_loader, 'train_h', lambda m: m.act_hier),
+                (val_dataset, val_loader, 'val', lambda m: m.act),
+                (val_dataset, val_loader, 'val_h', lambda m: m.act_hier),
                 ]:
-                #(val_dataset, val_loader, 'val', lambda m: m.act),
-                #(val_dataset, val_loader, 'val_h', lambda m: m.act_hier)
             training.validate(model, d, l, ENV, n, f)
 
     with hlog.task('train'):
@@ -131,8 +129,7 @@ def main():
                     validate()
                     stats = Counter()
 
-            #_save(model, i_epoch, FLAT_TAG)
-            #validate()
+            _save(model, i_epoch, FLAT_TAG)
 
             # parse
             parses = {}
@@ -143,8 +140,6 @@ def main():
                     batch_parses = model.parse(seq_batch)
                     assert not any(k in parses for k in batch_parses)
                     parses.update(batch_parses)
-
-            validate()
 
             # hier step
             stats = Counter()

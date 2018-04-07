@@ -57,8 +57,8 @@ class CraftEnv(object):
     def sample_task(self, task_id, interesting=False):
         while True:
             try:
-                task = Task.sample(task_id)
-                if FLAGS.debug and task.desc not in self.ALLOWED:
+                task = Task.sample(task_id, self)
+                if FLAGS.debug and task._nl_desc not in self.ALLOWED:
                     continue
                 if interesting and task.action not in (Task.ADD, Task.REMOVE):
                     continue
@@ -182,7 +182,7 @@ class Task(object):
     }
 
     @classmethod
-    def sample(cls, task_id):
+    def sample(cls, task_id, env):
         scene1 = Scene.sample()
         action = np.random.choice(cls._actions, p=cls._action_probs)
 
@@ -229,18 +229,19 @@ class Task(object):
             part = blocks[np.random.randint(len(blocks))]
             desc = 'a ' + next(part.block_type.descriptions()) + ' block'
 
-        return Task(task_id, action, part, desc, scene_before, scene_after, here)
+        return Task(task_id, action, part, desc, scene_before, scene_after, here, env)
 
     def __init__(self, task_id, action, part, part_desc, scene_before,
-            scene_after, here):
+            scene_after, here, env):
         self.task_id = task_id
         self.action = action
         self.part = part
         part_target_opts = list(self.part.positions())
         self._part_target = part_target_opts[np.random.randint(len(part_target_opts))]
-        self._part_desc = part_desc
+        self._nl_part_desc = part_desc
         self.here = here
-        self.desc = next(self._descriptions())
+        self._nl_desc = next(self._descriptions())
+        self.desc = ling.tokenize(self._nl_desc, env.vocab)
         self.scene_before = scene_before
         self.scene_after = scene_after
 
@@ -263,7 +264,7 @@ class Task(object):
 
     def _descriptions(self):
         here = ' here' if self.here else ''
-        yield '%s %s%s' % (self._action_names[self.action], self._part_desc, here)
+        yield '%s %s%s' % (self._action_names[self.action], self._nl_part_desc, here)
 
     def demonstration(self):
         if self.action == self.FIND:
@@ -273,7 +274,7 @@ class Task(object):
         else:
             demo, state = self._demonstrate_change(self.init_state)
         demo.append((state, (CraftEnv.STOP, None), None))
-        assert self.validate(demo[-1][0], debug=False) > 0, self.desc
+        assert self.validate(demo[-1][0], debug=False) > 0, self._nl_desc
         return demo
 
     def _demonstrate_find(self, state):
@@ -381,7 +382,7 @@ class Task(object):
         descs = [desc for part in parts for desc in part.descriptions(top=True)]
         if(debug):
             print(descs)
-        if self._part_desc in descs:
+        if self._nl_part_desc in descs:
             return 1.
         return 0.
 
@@ -398,7 +399,7 @@ class Task(object):
             if isinstance(p, type(self.part))]
         parts = [
             p for p in parts
-            if self._part_desc in p.descriptions(top=True)]
+            if self._nl_part_desc in p.descriptions(top=True)]
 
         init_blocks = self.init_state.blocks.sum(axis=0)
         final_blocks = state.blocks.sum(axis=0)
@@ -472,7 +473,7 @@ class Task(object):
                 and ((added_shape[0] == 1 and added_shape[2] > 1)
                      or (added_shape[2] == 1 and added_shape[0] > 1)))
 
-        print(self.desc)
+        print(self._nl_desc)
         assert False
 
     def _validate_remove(self, state):
@@ -510,5 +511,5 @@ class Task(object):
                 added_shape is None
                 and any(removed))
 
-        print(self.desc)
+        print(self._nl_desc)
         assert False

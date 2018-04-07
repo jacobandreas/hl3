@@ -72,7 +72,7 @@ class SeqBatch(
         out_state_obs = Variable(torch.FloatTensor(out_state_obs))
         out_world_obs = Variable(torch.FloatTensor(out_world_obs))
         out_desc, out_desc_tgt = load_desc_data(
-            out_desc_raw, dataset, target=True)
+            out_desc_raw, dataset, target=True, tokenize=False)
         out_desc = Variable(out_desc)
         out_desc_tgt = Variable(out_desc_tgt)
         
@@ -95,12 +95,12 @@ class SeqBatch(
 
 class StepBatch(
         namedtuple('StepBatch', [
-            'init_obs', 'obs', 'act', 'act_mask', 'final', 'desc_in',
+            'init_obs', 'obs', 'act', 'act_mask', 'final', 'desc', 'desc_in',
             'desc_out', 'desc_out_tgt']),
         Cudable):
 
     @classmethod
-    def for_states(cls, init_obs, obs, desc, dataset):
+    def for_states(cls, init_obs, obs, descs, dataset):
         init_state_obs, init_world_obs = zip(*init_obs)
         state_obs, world_obs = zip(*obs)
 
@@ -109,23 +109,21 @@ class StepBatch(
         state_obs = Variable(torch.FloatTensor(state_obs))
         world_obs = Variable(torch.FloatTensor(world_obs))
 
-        desc_in = Variable(load_desc_data(desc, dataset))
+        desc_in = Variable(load_desc_data(descs, dataset, tokenize=False))
 
         out_batch = StepBatch(
             (init_state_obs, init_world_obs), (state_obs, world_obs),
             None, None, None,
-            desc_in,
+            descs, desc_in,
             None, None)
         if FLAGS.gpu:
             out_batch = out_batch.cuda()
         return out_batch
 
     @classmethod
-    def for_seq(
-            cls, seq_batch, i_task, start, end, dataset, raw_desc=None, 
-            tok_desc=None):
+    def for_seq(cls, seq_batch, i_task, start, end, dataset, desc):
         obs = tuple(opart[i_task, start:end, ...] for opart in seq_batch.obs)
-        init_obs = (opart[i_task, ...] for opart in seq_batch.init_obs())
+        init_obs = (opart[i_task, start, ...] for opart in seq_batch.obs)
         init_obs = tuple(io.expand_as(o) for io, o in zip(init_obs, obs))
 
         act = tuple(Variable(torch.LongTensor(a))
@@ -133,18 +131,12 @@ class StepBatch(
         act_mask = tuple(Variable(torch.FloatTensor(a))
             for a in zip(*seq_batch.act_mask[i_task][start:end]))
 
-        if raw_desc is not None:
-            desc_in = load_desc_data([raw_desc], dataset, tokenize=True)
-        elif tok_desc is not None:
-            desc_in = load_desc_data([tok_desc], dataset, tokenize=False)
-        else:
-            desc_in = load_desc_data(
-                [seq_batch.tasks[i_desc].desc], dataset, tokenize=True)
+        desc_in = load_desc_data([desc], dataset, tokenize=False)
         desc_in = desc_in.expand(-1, end-start, -1)
         desc_in = Variable(desc_in)
 
         out_batch = StepBatch(
-            init_obs, obs, act, act_mask, None, desc_in, None, None)
+            init_obs, obs, act, act_mask, None, [desc], desc_in, None, None)
         if FLAGS.gpu:
             out_batch = out_batch.cuda()
         return out_batch
@@ -221,9 +213,9 @@ class StepBatch(
         out_act_mask = tuple(Variable(torch.FloatTensor(am))
             for am in out_act_mask)
         out_final = Variable(torch.FloatTensor(out_final))
-        out_desc_in = Variable(load_desc_data(out_desc_in_raw, dataset))
+        out_desc_in = Variable(load_desc_data(out_desc_in_raw, dataset, tokenize=False))
 
-        if len(out_desc_out_raw) == 0:
+        if len(out_desc_out_raw) == 0 or max(len(d) for d in out_desc_out_raw) == 0:
             out_desc_out = out_desc_out_tgt = None
         else:
             out_desc_out, out_desc_out_tgt = load_desc_data(
@@ -234,7 +226,7 @@ class StepBatch(
         out_batch = StepBatch(
             (out_init_state_obs, out_init_world_obs),
             (out_state_obs, out_world_obs),
-            out_act, out_act_mask, out_final, out_desc_in, 
+            out_act, out_act_mask, out_final, out_desc_in_raw, out_desc_in, 
             out_desc_out, out_desc_out_tgt)
         if FLAGS.gpu:
             out_batch = out_batch.cuda()
@@ -352,6 +344,7 @@ def get_dataset(env):
     return dataset, val_dataset
 
 def load_desc_data(descs, dataset, target=False, tokenize=True):
+    assert not tokenize
     if tokenize:
         assert all(isinstance(d, str) for d in descs)
         proc_descs = [ling.tokenize(d, dataset.vocab) for d in descs]

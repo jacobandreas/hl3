@@ -46,11 +46,9 @@ class TopDownParser(object):
         descs = [descs[i:i+n] for i in range(0, len(descs), n)]
         return descs
 
-    def score_span(
-            self, seq_batch, i_task, start, end, raw_desc=None, tok_desc=None):
+    def score_span(self, seq_batch, i_task, start, end, desc):
         step_batch = StepBatch.for_seq(
-            seq_batch, i_task, start, end+1, self._dataset,
-            raw_desc=raw_desc, tok_desc=tok_desc)
+            seq_batch, i_task, start, end+1, self._dataset, desc)
 
         # patch in STOP action
         step_batch.act[0][-1] = self._env.STOP
@@ -67,21 +65,19 @@ class TopDownParser(object):
             actions = seq_batch.act[i_task]
             assert task.task_id not in out
             out[task.task_id] = self._parse_inner(
-                seq_batch, i_task, 0, len(actions) - 1, 1,
-                raw_desc=task.desc)
+                seq_batch, i_task, 0, len(actions) - 1, 1, task.desc)
         return out
 
     def best_desc(self, seq_batch, i_task, start, end, descs):
         scores = [
-            self.score_span(seq_batch, i_task, start, end, tok_desc=desc).sum()
+            self.score_span(seq_batch, i_task, start, end, desc).sum()
             for desc in descs]
         scores = [unwrap(score)[0] for score in scores]
         return min(zip(scores, descs))
 
     # TODO cleanup
     @profile
-    def _parse_inner(self, seq_batch, i_task, start, end, remaining_depth,
-            raw_desc=None, tok_desc=None):
+    def _parse_inner(self, seq_batch, i_task, start, end, remaining_depth, top_desc):
         if remaining_depth <= 0:
             return []
         if end - start < 2:
@@ -91,8 +87,7 @@ class TopDownParser(object):
 
         # TODO only this segment
         root_scores = self.score_span(
-            seq_batch, i_task, 0, len(seq_batch.act[i_task])-1,
-            raw_desc=raw_desc, tok_desc=tok_desc)
+            seq_batch, i_task, 0, len(seq_batch.act[i_task])-1, top_desc)
 
         splits = unwrap(self.propose_splits(seq_batch, i_task, start, end))
         splits = [int(k) for k in splits]
@@ -138,7 +133,7 @@ class TopDownParser(object):
         ]
         #if not (d1 is None and d2 is None): # and np.random.random() < 0.05:
         #    print(
-        #        raw_desc or self._dataset.render_desc(tok_desc),
+        #        self._dataset.render_desc(top_desc),
         #        ':', 
         #        self._dataset.render_desc(d1) if d1 else '_', 
         #        '>', 
@@ -146,13 +141,10 @@ class TopDownParser(object):
         #    print(actions[start:split], actions[split:end])
         #    print()
 
-        for start_, end_, tdesc_ in [(start, split, d1), (split, end, d2)]:
-            if tdesc_ is not None:
-                rdesc_ = None
-            else:
-                rdesc_, tdesc_ = raw_desc, tok_desc
+        for start_, end_, desc_ in [(start, split, d1), (split, end, d2)]:
+            if desc_ is None:
+                desc_ = top_desc
             out += self._parse_inner(
-                seq_batch, i_task, start_, end_, remaining_depth-1,
-                raw_desc=rdesc_, tok_desc=tdesc_)
+                seq_batch, i_task, start_, end_, remaining_depth-1, desc_)
 
         return out
