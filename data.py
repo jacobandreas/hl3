@@ -42,7 +42,7 @@ class SeqBatch(
         Cudable):
 
     @classmethod
-    def of(cls, batch, dataset):
+    def of(cls, batch, dataset, parses=None):
         tasks, actions, (state_obs, world_obs) = batch
 
         n_seqs = len(tasks)
@@ -57,17 +57,23 @@ class SeqBatch(
         out_act = []
         out_act_mask = []
         out_desc_raw = []
-        for task_id in range(len(tasks)):
-            so = state_obs[task_id]
-            wo = world_obs[task_id]
-            l = so.shape[0]
-            out_state_obs[task_id, :l, ...] = state_obs[task_id][:l, ...]
-            out_world_obs[task_id, :l, ...] = world_obs[task_id][:l, ...]
-            out_length.append(l)
-            a, a_mask = zip(*[dataset.ravel_action(a) for a in actions[task_id]])
+        for i_task in range(len(tasks)):
+            so = state_obs[i_task]
+            wo = world_obs[i_task]
+
+            spans = [(tasks[i_task].desc, (0, so.shape[0]-1))]
+            if parses is not None:
+                spans += [(d, s) for d, s in parses[i_task] if d is not None]
+            desc_here, (start, end) = spans[np.random.randint(len(spans))]
+
+            out_state_obs[i_task, :end-start+1, ...] = so[start:end+1, ...]
+            out_world_obs[i_task, :end-start+1, ...] = wo[start:end+1, ...]
+            out_length.append(end-start+1)
+            actions_here = actions[i_task][start:end] + [(dataset.env.STOP, None)]
+            a, a_mask = zip(*[dataset.ravel_action(a) for a in actions_here])
             out_act.append(a)
             out_act_mask.append(a_mask)
-            out_desc_raw.append(tasks[task_id].desc)
+            out_desc_raw.append(desc_here)
 
         out_state_obs = Variable(torch.FloatTensor(out_state_obs))
         out_world_obs = Variable(torch.FloatTensor(out_world_obs))
@@ -143,17 +149,18 @@ class StepBatch(
 
     @classmethod
     def of(cls, batch, dataset, hier=False, parses=None):
-        assert hier == (parses is not None)
+        if hier:
+            assert parses is not None
         tasks, actions, (state_obs, world_obs) = batch
 
         n_seqs = len(tasks)
         n_steps = sum(len(acts) for acts in actions)
         def to_indices(step):
             counter = 0
-            for task_id in range(n_seqs):
-                seq_len = len(actions[task_id])
+            for i_task in range(n_seqs):
+                seq_len = len(actions[i_task])
                 if step - counter < seq_len:
-                    return task_id, step - counter
+                    return i_task, step - counter
                 counter += seq_len
             assert False
 
@@ -197,11 +204,18 @@ class StepBatch(
                 out_desc_in_raw.append(tasks[i_task].desc)
                 out_desc_out_raw.append(d)
             else:
-                a, a_mask = dataset.ravel_action(actions[i_task][i_step])
+                spans = [(tasks[i_task].desc, (0, len(actions[i_task])-1))]
+                if parses is not None:
+                    spans += [
+                        (d, (s, e)) for d, (s, e) in parses[i_task]
+                        if (d is not None) and (s <= i_step <= e)]
+                desc_here, (start, end) = spans[np.random.randint(len(spans))]
+                action = (dataset.env.STOP, None) if i_step == end else actions[i_task][i_step]
+                a, a_mask = dataset.ravel_action(action)
                 out_act.append(a)
                 out_act_mask.append(a_mask)
-                out_final.append(i_step == len(actions[i_task]) - 1)
-                out_desc_in_raw.append(tasks[i_task].desc)
+                out_final.append(i_step == end)
+                out_desc_in_raw.append(desc_here)
 
         out_init_state_obs = Variable(torch.FloatTensor(out_init_state_obs))
         out_init_world_obs = Variable(torch.FloatTensor(out_init_world_obs))

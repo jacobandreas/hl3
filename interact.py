@@ -48,7 +48,7 @@ def visualize(scenes, prefix):
         with open('%s_%s.json' % (prefix, name), 'w') as scene_f:
             scene.dump(label, scene_f)
 
-def validate(model, dataset, loader, env, log_name, act_fn, dump=False):
+def execute(model, dataset, loader, env, log_name, act_fn, dump=False):
     score = 0.
     tot = 0.
     for i_batch, batch in enumerate(loader):
@@ -57,7 +57,9 @@ def validate(model, dataset, loader, env, log_name, act_fn, dump=False):
         steps = [rollout(tg, model, dataset, env, act_fn) for tg in task_groups]
         steps = sum(steps, [])
         last_states = [ss[-1][0] for ss in steps]
+        last_actions = [ss[-1][1][0] for ss in steps]
         scores = [t.validate(s) for t, s in zip(batch.tasks, last_states)]
+        scores = [0. if a != env.STOP else s for s, a in zip(scores, last_actions)]
         score += sum(scores)
         tot += len(scores)
         if dump and i_batch == 0:
@@ -65,7 +67,7 @@ def validate(model, dataset, loader, env, log_name, act_fn, dump=False):
             for i_task in range(5):
                 task = batch.tasks[i_task]
                 with hlog.task(str(i_task), timer=False):
-                    hlog.value('desc', task.desc)
+                    hlog.value('desc', dataset.render_desc(task.desc))
                     hlog.value('gold', [a for s, a, s_ in task.demonstration()])
                     hlog.value('pred', [a for s, a, s_ in steps[i_task]])
                     hlog.value('score_here', scores[i_task])
@@ -79,29 +81,3 @@ def validate(model, dataset, loader, env, log_name, act_fn, dump=False):
     score /= tot
     with hlog.task(log_name, timer=False):
         hlog.value('score', score)
-
-    #val_stats = Counter()
-    #val_count = 0
-    #for pol_batch, seg_batch in islice(val_loader, 100):
-    #    pol_batch = pol_batch.cuda()
-    #    seg_batch = seg_batch.cuda()
-    #    val_stats += model.evaluate(pol_batch, seg_batch, train=False)
-    #    val_count += 1
-    #for k, v in val_stats.items():
-    #    hlog.value(k, v / val_count)
-
-    #with hlog.task('rollout'):
-    #    eval_task = env.sample_task()
-    #    steps = rollout(eval_task, model, dataset, env)
-    #    actions = [s[1] for s in steps]
-    #    last_state = steps[-1][0]
-    #    last_scene = last_state.to_scene()
-    #    hlog.value('desc', eval_task.desc)
-    #    hlog.value('pred', ' '.join(env.action_name(a) for a in actions))
-    #    hlog.value('gold', ' '.join(env.action_name(a) for s, a, s_ in eval_task.demonstration()))
-    #    with open('vis/before.json', 'w') as scene_f:
-    #        eval_task.scene_before.dump(scene_f)
-    #    with open('vis/after.json', 'w') as scene_f:
-    #        last_scene.dump(scene_f)
-    #    with open('vis/after_gold.json', 'w') as scene_f:
-    #        eval_task.scene_after.dump(scene_f)

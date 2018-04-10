@@ -6,8 +6,8 @@ import numpy as np
 import torch
 
 FLAGS = gflags.FLAGS
-gflags.DEFINE_integer('n_parse_splits', 2, 'number of parser splits to consider')
-gflags.DEFINE_integer('n_parse_descs', 2, 'number of parser span descriptions to consider')
+gflags.DEFINE_integer('n_parse_splits', 3, 'number of parser splits to consider')
+gflags.DEFINE_integer('n_parse_descs', 3, 'number of parser span descriptions to consider')
 gflags.DEFINE_integer('parse_desc_max_len', 20, 'max length of parser span description')
 
 class TopDownParser(object):
@@ -131,15 +131,15 @@ class TopDownParser(object):
             (d1, (start, split)),
             (d2, (split, end))
         ]
-        #if not (d1 is None and d2 is None): # and np.random.random() < 0.05:
-        #    print(
-        #        self._dataset.render_desc(top_desc),
-        #        ':', 
-        #        self._dataset.render_desc(d1) if d1 else '_', 
-        #        '>', 
-        #        self._dataset.render_desc(d2) if d2 else '_')
-        #    print(actions[start:split], actions[split:end])
-        #    print()
+        if not (d1 is None and d2 is None): # and np.random.random() < 0.05:
+            print(
+                self._dataset.render_desc(top_desc),
+                ':', 
+                self._dataset.render_desc(d1) if d1 else '_', 
+                '>', 
+                self._dataset.render_desc(d2) if d2 else '_')
+            print(actions[start:split], actions[split:end])
+            print()
 
         for start_, end_, desc_ in [(start, split, d1), (split, end, d2)]:
             if desc_ is None:

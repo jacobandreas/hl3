@@ -5,10 +5,9 @@ from parser import TopDownParser
 
 from collections import Counter
 import gflags
-import itertools as it
 import numpy as np
 import torch
-from torch import nn, optim
+from torch import nn
 from torch.autograd import Variable
 
 FLAGS = gflags.FLAGS
@@ -166,13 +165,6 @@ class Model(nn.Module):
 
         self._parser = TopDownParser(self, env, dataset)
 
-        self._step_opt = optim.Adam(it.chain(
-            self._featurizer.parameters(), self._flat_policy.parameters(),
-            self._segmenter.parameters()))
-        self._seq_opt = optim.Adam(it.chain(
-            self._featurizer.parameters(), self._describer.parameters()))
-        self._hier_opt = optim.Adam(self._hier_policy.parameters())
-
     def parse(self, seq_batch):
         return self._parser.parse(seq_batch)
 
@@ -257,17 +249,16 @@ class Model(nn.Module):
                 step_batch.desc_out_tgt.view(n_tok * n_batch)).mean()
         return act_lp + act_pos_lp + desc_lp
 
-    def train_step(self, step_batch):
+    def score_step(self, step_batch, train=False):
         feats = self._featurizer(step_batch.init_obs, step_batch.obs)
         pol_loss = self._logprob_of(self._flat_policy, feats, step_batch).mean()
         seg_loss = self._segmenter_obj(self._segmenter(feats), step_batch.final)
-        loss = pol_loss + seg_loss
-        self._step_opt.zero_grad()
-        loss.backward()
-        self._step_opt.step()
-        return Counter({'pol_loss': unwrap(loss)[0]})
+        return pol_loss + seg_loss, {
+            'pol_loss': unwrap(pol_loss)[0],
+            'seg_loss': unwrap(seg_loss)[0],
+        }
 
-    def train_seq(self, seq_batch):
+    def score_seq(self, seq_batch, train=False):
         state_feats, _ = self._featurizer(
             seq_batch.init_obs(), seq_batch.last_obs(), skip_world=True)
         _, desc_logits = self._describer(state_feats.unsqueeze(0), seq_batch.desc)
@@ -275,16 +266,15 @@ class Model(nn.Module):
         desc_loss = self._describer_obj(
             desc_logits.view(n_tok * n_batch, n_pred),
             seq_batch.desc_tgt.view(n_tok * n_batch))
-        loss = desc_loss
-        self._seq_opt.zero_grad()
-        loss.backward()
-        self._seq_opt.step()
-        return Counter({'desc_loss': unwrap(loss)[0]})
+        return desc_loss, {
+            'desc_loss': unwrap(desc_loss)[0],
+        }
 
-    def train_hier(self, step_batch):
+    def score_hier(self, step_batch, train=False):
         feats = self._featurizer(step_batch.init_obs, step_batch.obs)
         loss = self._logprob_of(self._hier_policy, feats, step_batch).mean()
-        self._hier_opt.zero_grad()
-        loss.backward()
-        self._hier_opt.step()
-        return Counter({'hier_loss': unwrap(loss)[0]})
+        if train:
+            self._hier_opt.zero_grad()
+            loss.backward()
+            self._hier_opt.step()
+        return {'hier_loss': unwrap(loss)[0]}

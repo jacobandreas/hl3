@@ -110,4 +110,4 @@ vis/scenes
 *.lprof
 
 # checkpoints
-_models/
+_models*/

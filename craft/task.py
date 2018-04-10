@@ -60,8 +60,8 @@ class CraftEnv(object):
                 task = Task.sample(task_id, self)
                 if FLAGS.debug and task._nl_desc not in self.ALLOWED:
                     continue
-                if interesting and task.action not in (Task.ADD, Task.REMOVE):
-                    continue
+                #if interesting and task.action not in (Task.CLONE, Task.ADD, Task.REMOVE):
+                #    continue
                 break
             except BuilderException as e:
                 print(e)
@@ -72,13 +72,16 @@ class CraftEnv(object):
     def action_name(cls, action):
         return cls._action_names[action]
 
-class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
+class CraftState(namedtuple('CraftState', ['init_blocks', 'blocks', 'pos', 'mat'])):
     @classmethod
     def from_scene(cls, scene, pos, mat):
         blocks = np.zeros((CraftEnv.n_block_types,) + CraftEnv.world_shape)
         for block in scene.blocks():
             blocks[(block.block_type.mat_id(),) + block.pos] = 1
-        return CraftState(blocks, pos, mat)
+        return CraftState(blocks, blocks, pos, mat)
+
+    def with_init(self, init):
+        return self._replace(init_blocks=init.blocks)
 
     def to_scene(self):
         size = self.blocks.shape[1:]
@@ -145,7 +148,11 @@ class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
         pos_features = np.zeros((1,) + CraftEnv.world_shape)
         x, y, z = self.pos
         pos_features[0, x, y, z] = 1
-        world_features = np.concatenate((self.blocks, pos_features), axis=0)
+        world_features = np.concatenate((
+                self.blocks,
+                self.blocks - self.init_blocks,
+                pos_features),
+            axis=1)
 
         def pad_slice(f, w, h, d, x, y, z, data):
             e = np.zeros((f, w+4, h+4, d+4))
@@ -157,11 +164,15 @@ class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
 
         f = CraftEnv.n_block_types
         w, h, d = CraftEnv.world_shape
+        init_local_features = pad_slice(f, w, h, d, x, y, z, self.init_blocks)
         local_features = pad_slice(f, w, h, d, x, y, z, self.blocks)
         mat_features = np.zeros((CraftEnv.n_block_types,))
         mat_features[self.mat] = 1
         state_features = np.concatenate((
-            local_features.ravel(), mat_features))
+                local_features.ravel()
+                (local_features - init_local_features).ravel(),
+                mat_features),
+            axis=0)
 
         return state_features, world_features
 
@@ -188,14 +199,16 @@ class Task(object):
 
         parts = list(scene1.parts())
         def part_filter(part):
+            if not (isinstance(part, Block) or isinstance(part, Course)):
+                return False
             if action == cls.ADD and isinstance(part, Block):
                 return False
-            if action == cls.ADD and isinstance(part, Wall) and part.incomplete:
-                return False
-            if action == cls.ADD or action == cls.REMOVE:
-                return (
-                    not isinstance(part, House) 
-                    and not isinstance(part, Tree))
+            #if action == cls.ADD and isinstance(part, Wall) and part.incomplete:
+            #    return False
+            #if action == cls.ADD or action == cls.REMOVE:
+            #    return (
+            #        not isinstance(part, House) 
+            #        and not isinstance(part, Tree))
             if action == cls.CLONE:
                 return (
                     not isinstance(part, Window) 
@@ -252,15 +265,17 @@ class Task(object):
                 tuple(init_pos), init_mat)
         if here:
             demo = self.demonstration()
-            after_clone = [s_ for s, a, s_ in demo if a == CraftEnv.CLONE]
-            init_pos = part.pos
-            if len(after_clone) > 0:
-                init_mat = after_clone[0].mat
-        self.init_state = CraftState.from_scene(self.scene_before,
-                tuple(init_pos), init_mat)
+            alter = [i for i, (s, (a, _), s_) in enumerate(demo) if a in
+                    (CraftEnv.ADD, CraftEnv.REMOVE)]
+            if len(alter) > 0:
+                a_idx = alter[0]
+                init_mat = demo[a_idx][0].mat
+                init_pos = demo[a_idx][0].pos
+            self.init_state = CraftState.from_scene(self.scene_before,
+                    tuple(init_pos), init_mat)
 
         if here:
-            assert self.demonstration()[0][1] != CraftEnv.GO
+            assert self.demonstration()[0][1][0] != CraftEnv.GO
 
     def _descriptions(self):
         here = ' here' if self.here else ''

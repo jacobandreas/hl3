@@ -16,6 +16,9 @@ def task(name, timer=True):
         print('%s{%0.2fs}' % ('/'.join(state.path), end - begin))
     state.path.pop()
 
+def group(name):
+    return task(name, timer=False)
+
 def log(value):
     if isinstance(value, float):
         value = "%0.4f" % value
@@ -34,6 +37,7 @@ def fn(name, timer=True):
     def wrap(underlying):
         def wrapped(*args, **kwargs):
             with task(name, timer):
-                underlying(*args, **kwargs)
+                result = underlying(*args, **kwargs)
+            return result
         return wrapped
     return wrap
