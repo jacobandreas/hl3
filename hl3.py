@@ -31,7 +31,8 @@ gflags.DEFINE_integer('n_exec', 10, 'num passes after which to do live rollouts'
 gflags.DEFINE_integer('n_parse', 1, 'number of epochs after which to re-parse')
 gflags.DEFINE_string('cache_dir', '/data/jda/hl3/_cache', 'feature cache directory')
 gflags.DEFINE_string('val_cache_dir', '/data/jda/hl3/_val_cache', 'val feature cache directory')
-gflags.DEFINE_string('model_dir', '_models', 'model checkpoint directory')
+gflags.DEFINE_string('model_dir', 'models', 'model checkpoint directory')
+gflags.DEFINE_string('vis_dir', 'vis', 'visualization')
 gflags.DEFINE_integer('resume_epoch', None, 'epoch from which to resume')
 gflags.DEFINE_boolean('resume_flat', False, 'resume from the flat step')
 gflags.DEFINE_boolean('train_flat_on_parse', False, 'train flat model on subtasks extracted by parser')
@@ -101,7 +102,7 @@ def main():
     vtrain_loader = torch_data.DataLoader(
         dataset, batch_size=FLAGS.n_batch_examples, shuffle=False,
         num_workers=1,
-        sampler=list(range(50)),
+        sampler=list(range(FLAGS.n_val_examples)),
         collate_fn=lambda items: data.collate(items, dataset))
 
     val_loader = torch_data.DataLoader(

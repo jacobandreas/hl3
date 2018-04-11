@@ -72,16 +72,13 @@ class CraftEnv(object):
     def action_name(cls, action):
         return cls._action_names[action]
 
-class CraftState(namedtuple('CraftState', ['init_blocks', 'blocks', 'pos', 'mat'])):
+class CraftState(namedtuple('CraftState', ['blocks', 'pos', 'mat'])):
     @classmethod
     def from_scene(cls, scene, pos, mat):
         blocks = np.zeros((CraftEnv.n_block_types,) + CraftEnv.world_shape)
         for block in scene.blocks():
             blocks[(block.block_type.mat_id(),) + block.pos] = 1
-        return CraftState(blocks, blocks, pos, mat)
-
-    def with_init(self, init):
-        return self._replace(init_blocks=init.blocks)
+        return CraftState(blocks, pos, mat)
 
     def to_scene(self):
         size = self.blocks.shape[1:]
@@ -148,11 +145,7 @@ class CraftState(namedtuple('CraftState', ['init_blocks', 'blocks', 'pos', 'mat'
         pos_features = np.zeros((1,) + CraftEnv.world_shape)
         x, y, z = self.pos
         pos_features[0, x, y, z] = 1
-        world_features = np.concatenate((
-                self.blocks,
-                self.blocks - self.init_blocks,
-                pos_features),
-            axis=1)
+        world_features = np.concatenate((self.blocks, pos_features), axis=0)
 
         def pad_slice(f, w, h, d, x, y, z, data):
             e = np.zeros((f, w+4, h+4, d+4))
@@ -164,15 +157,11 @@ class CraftState(namedtuple('CraftState', ['init_blocks', 'blocks', 'pos', 'mat'
 
         f = CraftEnv.n_block_types
         w, h, d = CraftEnv.world_shape
-        init_local_features = pad_slice(f, w, h, d, x, y, z, self.init_blocks)
         local_features = pad_slice(f, w, h, d, x, y, z, self.blocks)
         mat_features = np.zeros((CraftEnv.n_block_types,))
         mat_features[self.mat] = 1
         state_features = np.concatenate((
-                local_features.ravel()
-                (local_features - init_local_features).ravel(),
-                mat_features),
-            axis=0)
+            local_features.ravel(), mat_features))
 
         return state_features, world_features
 
@@ -183,7 +172,7 @@ class Task(object):
     CLONE = 3
 
     _actions = [FIND, ADD, REMOVE, CLONE]
-    _action_probs = [0.3, 0.3, 0.3, 0.1]
+    _action_probs = [0.2, 0.3, 0.3, 0.2]
     #_action_probs = [0.8, 0., 0., 0.2]
     _action_names = {
         FIND: 'find',
@@ -199,7 +188,12 @@ class Task(object):
 
         parts = list(scene1.parts())
         def part_filter(part):
-            if not (isinstance(part, Block) or isinstance(part, Course)):
+            #if not (isinstance(part, Block) or isinstance(part, Course)):
+            #    return False
+            if (
+                    isinstance(part, Tree) 
+                    or isinstance(part, Wall)
+                    or isinstance(part, House)):
                 return False
             if action == cls.ADD and isinstance(part, Block):
                 return False

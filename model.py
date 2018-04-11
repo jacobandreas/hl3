@@ -11,10 +11,10 @@ from torch import nn
 from torch.autograd import Variable
 
 FLAGS = gflags.FLAGS
-gflags.DEFINE_integer('hidden_size', 256, 'common size of hidden states')
-gflags.DEFINE_integer('filter_size', 64, 'number of intermediate conv filters')
+gflags.DEFINE_integer('hidden_size', 250, 'common size of hidden states')
+gflags.DEFINE_integer('filter_size', 50, 'number of intermediate conv filters')
 gflags.DEFINE_integer('conv_window', 5, 'size of convolutional window')
-gflags.DEFINE_integer('wordvec_size', 64, 'word vector size')
+gflags.DEFINE_integer('wordvec_size', 50, 'word vector size')
 
 class WorldFeaturizer(nn.Module):
     def __init__(self, env, dataset):
@@ -28,20 +28,27 @@ class WorldFeaturizer(nn.Module):
             nn.ReLU(),
             nn.Conv3d(chid1, chid2, 1))
         self._mlp = nn.Sequential(
-            nn.Linear(2*env.n_state_obs, hid),
+            nn.Linear(env.n_state_obs, hid),
             nn.ReLU(),
             nn.Linear(hid, hid))
 
-    def forward(self, init_obs, obs, skip_world=False):
+    def forward(self, init_obs, obs):
         init_state_obs, init_world_obs = init_obs
         state_obs, world_obs = obs
-        in_state_obs = torch.cat((state_obs, state_obs-init_state_obs), 1)
+
+        #in_state_obs = torch.cat((state_obs, state_obs-init_state_obs), 1)
+        in_state_obs = state_obs
         state_feats = self._mlp(in_state_obs)
-        if skip_world:
-            return state_feats, None
+
         in_world_obs = torch.cat((world_obs, world_obs-init_world_obs), 1)
         world_feats = self._conv(in_world_obs)
-        return state_feats, world_feats
+
+        b, f, w, h, d = world_feats.shape
+        pool_feats = world_feats.view(b, f, w*h*d).mean(dim=2)
+
+        local_feats = state_feats + pool_feats
+
+        return local_feats, world_feats
 
 class Policy(nn.Module):
     def __init__(self, env, dataset):
@@ -260,7 +267,7 @@ class Model(nn.Module):
 
     def score_seq(self, seq_batch, train=False):
         state_feats, _ = self._featurizer(
-            seq_batch.init_obs(), seq_batch.last_obs(), skip_world=True)
+            seq_batch.init_obs(), seq_batch.last_obs())
         _, desc_logits = self._describer(state_feats.unsqueeze(0), seq_batch.desc)
         n_tok, n_batch, n_pred = desc_logits.shape
         desc_loss = self._describer_obj(

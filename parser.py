@@ -18,14 +18,16 @@ class TopDownParser(object):
 
     def propose_splits(self, seq_batch, i_task, start, end):
         size = len(seq_batch.act[i_task])
-        mid_state_obs = seq_batch.obs[0][i_task, start+1:end, :]
-        init_state_obs = seq_batch.obs[0][i_task, start, :].expand_as(mid_state_obs)
-        last_state_obs = seq_batch.obs[0][i_task, end, :].expand_as(mid_state_obs)
+        mid_obs = [opart[i_task, start+1:end, ...] for opart in seq_batch.obs]
+        init_obs = [
+            opart[i_task, start, ...].expand_as(mid) 
+            for opart, mid in zip(seq_batch.obs, mid_obs)]
+        last_obs = [
+            opart[i_task, end, :].expand_as(mid)
+            for opart, mid in zip(seq_batch.obs, mid_obs)]
 
-        feats_before = self._model._featurizer(
-            (init_state_obs, None), (mid_state_obs, None), skip_world=True)
-        feats_after = self._model._featurizer(
-            (mid_state_obs, None), (last_state_obs, None), skip_world=True)
+        feats_before = self._model._featurizer(init_obs, mid_obs)
+        feats_after = self._model._featurizer(mid_obs, last_obs)
         scores = (
             self._model._segmenter(feats_before)
             + self._model._segmenter(feats_after))
@@ -35,12 +37,17 @@ class TopDownParser(object):
     def propose_descs(self, seq_batch, indices):
         n = FLAGS.n_parse_descs
         max_len = FLAGS.parse_desc_max_len
-        init_state_obs = torch.cat(
-            [seq_batch.obs[0][b, i, :].expand(n, -1) for b, i, j in indices])
-        state_obs = torch.cat(
-            [seq_batch.obs[0][b, j, :].expand(n, -1) for b, i, j in indices])
-        state_feats, _ = self._model._featurizer(
-            (init_state_obs, None), (state_obs, None), skip_world=True)
+
+        init_obs = []
+        obs = []
+        for opart in seq_batch.obs:
+            new_shape = (n,) + tuple(-1 for _ in opart.shape[2:])
+            init_obs.append(torch.cat(
+                [opart[b, i, ...].expand(*new_shape) for b, i, j in indices]))
+            obs.append(torch.cat(
+                [opart[b, j, :].expand(*new_shape) for b, i, j in indices]))
+
+        state_feats, _ = self._model._featurizer(init_obs, obs)
         descs = self._model._describer.decode(
             state_feats.unsqueeze(0), max_len, sample=True)
         descs = [descs[i:i+n] for i in range(0, len(descs), n)]
@@ -65,7 +72,7 @@ class TopDownParser(object):
             actions = seq_batch.act[i_task]
             assert task.task_id not in out
             out[task.task_id] = self._parse_inner(
-                seq_batch, i_task, 0, len(actions) - 1, 1, task.desc)
+                seq_batch, i_task, 0, len(actions) - 1, 2, task.desc)
         return out
 
     def best_desc(self, seq_batch, i_task, start, end, descs):

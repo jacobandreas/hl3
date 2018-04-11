@@ -104,10 +104,7 @@ ENV/
 .*.swp
 
 # vis
-vis/node_modules
-vis/*.json
-vis/scenes
 *.lprof
 
-# checkpoints
-_models*/
+# experiments
+exp/

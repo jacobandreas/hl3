@@ -1,11 +1,13 @@
 import data
 import ling
 from misc import hlog
+from misc.stats import Stats
 
 from collections import Counter
 import gflags
 from itertools import islice
 import numpy as np
+import os
 import torch
 from torch.autograd import Variable
 
@@ -51,6 +53,7 @@ def visualize(scenes, prefix):
 def execute(model, dataset, loader, env, log_name, act_fn, dump=False):
     score = 0.
     tot = 0.
+    desc_stats = Stats()
     for i_batch, batch in enumerate(loader):
         #task_groups = [batch.tasks[i:i+5] for i in range(0, len(batch.tasks), 5)]
         task_groups = [batch.tasks]
@@ -60,8 +63,10 @@ def execute(model, dataset, loader, env, log_name, act_fn, dump=False):
         last_actions = [ss[-1][1][0] for ss in steps]
         scores = [t.validate(s) for t, s in zip(batch.tasks, last_states)]
         scores = [0. if a != env.STOP else s for s, a in zip(scores, last_actions)]
+        descs = [dataset.render_desc(t.desc) for t in batch.tasks]
         score += sum(scores)
         tot += len(scores)
+
         if dump and i_batch == 0:
             # TODO magic
             for i_task in range(5):
@@ -76,8 +81,14 @@ def execute(model, dataset, loader, env, log_name, act_fn, dump=False):
                             'before': (task.scene_before, task.desc),
                             'after': (last_states[i_task].to_scene(), task.desc),
                         },
-                        'vis/scenes/%s_%d' % (log_name, i_task))
+                        os.path.join(FLAGS.vis_dir, '%s_%d' % (log_name, i_task)))
+
+        for d, s in zip(descs, scores):
+            desc_stats += {d.split()[0]: s}
 
     score /= tot
     with hlog.task(log_name, timer=False):
         hlog.value('score', score)
+        with hlog.task('desc_score'):
+            for k, v in desc_stats:
+                hlog.value(k, v)
