@@ -279,9 +279,7 @@ class Model(nn.Module):
 
     def score_hier(self, step_batch, train=False):
         feats = self._featurizer(step_batch.init_obs, step_batch.obs)
-        loss = self._logprob_of(self._hier_policy, feats, step_batch).mean()
-        if train:
-            self._hier_opt.zero_grad()
-            loss.backward()
-            self._hier_opt.step()
-        return {'hier_loss': unwrap(loss)[0]}
+        hier_loss = self._logprob_of(self._hier_policy, feats, step_batch).mean()
+        return hier_loss, {
+            'hier_loss': unwrap(hier_loss)[0]
+        }

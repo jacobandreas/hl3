@@ -69,9 +69,10 @@ def execute(model, dataset, loader, env, log_name, act_fn, dump=False):
 
         if dump and i_batch == 0:
             # TODO magic
-            for i_task in range(5):
+            dump_indices = np.random.randint(len(batch.tasks), size=10)
+            for i_task in sorted(dump_indices):
                 task = batch.tasks[i_task]
-                with hlog.task(str(i_task), timer=False):
+                with hlog.task('%s/%d' % (log_name, i_task), timer=False):
                     hlog.value('desc', dataset.render_desc(task.desc))
                     hlog.value('gold', [a for s, a, s_ in task.demonstration()])
                     hlog.value('pred', [a for s, a, s_ in steps[i_task]])

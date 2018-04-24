@@ -19,7 +19,7 @@ import torch.utils.data as torch_data
 
 FLAGS = gflags.FLAGS
 gflags.DEFINE_integer('seed', 0, 'random seed')
-gflags.DEFINE_integer('n_examples', 500, 'num training examples to generate')
+gflags.DEFINE_integer('n_examples', 3000, 'num training examples to generate')
 gflags.DEFINE_integer('n_val_examples', 200, 'num training examples to generate')
 gflags.DEFINE_integer('n_batch_examples', 50, 'num full trajectories per batch')
 gflags.DEFINE_integer('n_batch_steps', 100, 'num steps per batch')
@@ -103,20 +103,20 @@ def main():
         dataset, batch_size=FLAGS.n_batch_examples, shuffle=False,
         num_workers=1,
         sampler=list(range(FLAGS.n_val_examples)),
-        collate_fn=lambda items: data.collate(items, dataset))
+        collate_fn=lambda items: data.collate(items, dataset, val=True))
 
     val_loader = torch_data.DataLoader(
         val_dataset, batch_size=FLAGS.n_batch_examples, shuffle=False,
         num_workers=1,
-        collate_fn=lambda items: data.collate(items, val_dataset))
+        collate_fn=lambda items: data.collate(items, val_dataset, val=True))
 
     @hlog.fn('exec')
     def execute():
         for d, l, n, f in [
                 (dataset, vtrain_loader, 'train', lambda m: m.act),
-                #(dataset, vtrain_loader, 'train_h', lambda m: m.act_hier),
+                (dataset, vtrain_loader, 'train_h', lambda m: m.act_hier),
                 (val_dataset, val_loader, 'val', lambda m: m.act),
-                #(val_dataset, val_loader, 'val_h', lambda m: m.act_hier),
+                (val_dataset, val_loader, 'val_h', lambda m: m.act_hier),
                 ]:
             interact.execute(model, d, l, ENV, n, f, dump=True)
 
@@ -135,6 +135,16 @@ def main():
         trainer.step(train_loss=loss)
         return stats
 
+    @hlog.fn('hier', timer=False)
+    def hier_step(batch, parses):
+        batch_parses = [parses[task.task_id] for task in batch.tasks]
+        seq_batch = data.StepBatch.of(
+            batch, dataset, hier=True, parses=batch_parses)
+        hier_loss, hier_stats = model.score_hier(seq_batch)
+        stats = Stats() + hier_stats
+        trainer.step(hier_loss=hier_loss)
+        return stats
+
     @hlog.fn('val', timer=False)
     def val_step():
         stats = Stats()
@@ -149,12 +159,13 @@ def main():
         trainer.step(val_loss=loss)
         _log(stats)
 
-    execute()
+    #execute()
 
     with hlog.task('learn'):
         i_iter = 0
         parses = defaultdict(list)
-        for i_epoch in hlog.loop('epoch_%03d', range(first_epoch, FLAGS.n_epochs)):
+        for i_epoch in hlog.loop(
+                'epoch_%03d', counter=range(first_epoch, FLAGS.n_epochs)):
 
             # flat step
             n_flat_passes = 0 if skip_flat else FLAGS.n_flat_passes
@@ -183,20 +194,15 @@ def main():
                         assert not any(k in parses for k in batch_parses)
                         parses.update(batch_parses)
 
-            ### # hier step
-            ### stats = Counter()
-            ### for i_pass in hlog.loop('hier_%03d', range(FLAGS.n_hier_passes)):
-            ###     for i_batch, batch in hlog.loop(
-            ###             'batch_%05d', enumerate(loader), timer=False):
-            ###         batch_parses = [parses[task.task_id] for task in batch.tasks]
-            ###         seq_batch = data.StepBatch.of(
-            ###             batch, dataset, hier=True, parses=batch_parses)
-            ###         stats += model.train_hier(seq_batch)
-            ###         stats['_count'] += 1
-            ###     if (i_pass + 1) % FLAGS.n_log == 0:
-            ###         _log(stats)
-            ###         validate()
-            ###         stats = Counter()
+            # hier step
+            for i_pass in hlog.loop('hier_%03d', range(FLAGS.n_hier_passes)):
+                stats = Stats()
+                for i_batch, batch in hlog.loop(
+                        'batch_%05d', enumerate(loader), timer=False):
+                    stats += hier_step(batch, parses)
+                _log(stats)
+                if (i_pass + 1) % FLAGS.n_exec == 0:
+                    execute()
 
             _save(model, trainer, i_epoch, HIER_TAG)
 

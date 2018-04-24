@@ -379,7 +379,9 @@ def load_desc_data(descs, dataset, target=False, tokenize=True):
     return desc_data, target_data
 
 
-def collate(items, dataset):
+def collate(items, dataset, val=False):
+    ### if not val:
+    ###     items = [i for i in items if not i[0].action == i[0].CLONE]
     tasks, actions, obs = zip(*items)
     # every observation is a tuple
     obs = list(zip(*obs))

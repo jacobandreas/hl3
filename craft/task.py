@@ -172,7 +172,7 @@ class Task(object):
     CLONE = 3
 
     _actions = [FIND, ADD, REMOVE, CLONE]
-    _action_probs = [0.2, 0.3, 0.3, 0.2]
+    _action_probs = [0.3, 0.3, 0.3, 0.1]
     #_action_probs = [0.8, 0., 0., 0.2]
     _action_names = {
         FIND: 'find',
@@ -192,7 +192,7 @@ class Task(object):
             #    return False
             if (
                     isinstance(part, Tree) 
-                    or isinstance(part, Wall)
+                    #or isinstance(part, Wall)
                     or isinstance(part, House)):
                 return False
             if action == cls.ADD and isinstance(part, Block):

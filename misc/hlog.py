@@ -28,8 +28,16 @@ def value(name, value):
     with task(name, timer=False):
         log(value)
 
-def loop(template, coll, timer=True):
-    for i, item in enumerate(coll):
+def loop(template, coll=None, counter=None, timer=True):
+    assert not (coll is None and counter is None)
+    if coll is None:
+        seq = zip(counter, counter)
+    elif counter is None:
+        seq = enumerate(coll)
+    else:
+        assert len(counter) == len(coll)
+        seq = zip(counter, coll)
+    for i, item in seq:
         with task(template % i, timer):
             yield item
 

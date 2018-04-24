@@ -28,4 +28,5 @@ class Stats(object):
     def __iter__(self):
         for k in sorted(self._contents.keys()):
             vs = self._contents[k]
-            yield k, '%0.4f ± %0.2f (%d)' % (np.mean(vs), np.std(vs), len(vs))
+            err = 1.96 * np.std(vs) / np.sqrt(len(vs))
+            yield k, '%0.4f ± %0.2f (%d)' % (np.mean(vs), err, len(vs))

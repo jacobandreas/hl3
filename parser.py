@@ -1,4 +1,5 @@
 from data import StepBatch
+import ling
 from misc.util import flatten, unwrap
 
 import gflags
@@ -72,7 +73,8 @@ class TopDownParser(object):
             actions = seq_batch.act[i_task]
             assert task.task_id not in out
             out[task.task_id] = self._parse_inner(
-                seq_batch, i_task, 0, len(actions) - 1, 2, task.desc)
+            #out[task.task_id] = self._parse_inner_dummy(
+                seq_batch, i_task, 0, len(actions) - 1, 3, task.desc)
         return out
 
     def best_desc(self, seq_batch, i_task, start, end, descs):
@@ -81,6 +83,25 @@ class TopDownParser(object):
             for desc in descs]
         scores = [unwrap(score)[0] for score in scores]
         return min(zip(scores, descs))
+
+    def _parse_inner_dummy(self, seq_batch, i_task, start, end, remaining_depth, top_desc):
+        nl_desc = self._dataset.render_desc(seq_batch.tasks[i_task].desc)
+        if not nl_desc.startswith('add a'):
+            return []
+        words = nl_desc.split()
+        color = words[2]
+        if color not in ('red', 'blue', 'wood'):
+            return []
+        actions = seq_batch.act[i_task]
+        if actions[1][0] != self._env.CLONE:
+            return []
+        thing = words[3]
+        desc1 = 'clone a %s block' % color
+        desc2 = 'build a %s here' % thing
+        return [
+            (ling.tokenize(desc1, self._env.vocab), (0, 2)),
+            (ling.tokenize(desc2, self._env.vocab), (2, len(actions)-1))
+        ]
 
     # TODO cleanup
     @profile
